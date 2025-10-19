@@ -46,11 +46,11 @@ Click the link above or search for "Enhanced Network Tab" in Firefox Add-ons.
 
 **This extension is 100% privacy-focused and works completely offline:**
 
-- ✅ No data is sent to any external servers
-- ✅ No analytics, tracking, or telemetry
-- ✅ All data stays in your browser
-- ✅ Only uses local storage for UI preferences (theme, column widths)
-- ✅ All network requests you see are made by YOU manually (via Repeater feature)
+- No data is sent to any external servers
+- No analytics, tracking, or telemetry
+- All data stays in your browser
+- Only uses local storage for UI preferences (theme, column widths)
+- All network requests you see are made by YOU manually (via Repeater feature)
 
 The extension only monitors and modifies network traffic you explicitly choose to intercept. No data leaves your machine.
 
