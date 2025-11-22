@@ -53,6 +53,9 @@
     --purple-bg: #9C27B0;
     --purple-hover: #7B1FA2;
     
+    --orange-bg: #FF9800;
+    --orange-hover: #F57C00;
+    
     --highlight-bg: #ffeb3b;
     --highlight-text: #000000;
     
@@ -113,6 +116,9 @@ body.dark-mode {
     --purple-bg: #9C27B0;
     --purple-hover: #7B1FA2;
     
+    --orange-bg: #FF9800;
+    --orange-hover: #F57C00;
+    
     --highlight-bg: #5a5a00;
     --highlight-text: #ffeb3b;
     
@@ -144,12 +150,15 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .controls {
     display: flex;
-    gap: 15px;
+    gap: 10px;
     align-items: center;
+    flex-wrap: wrap;
 }
 
 .toggle-switch {
@@ -234,6 +243,7 @@ input:checked + .slider:before {
 .search-container {
     flex: 1;
     max-width: 300px;
+    min-width: 200px;
 }
 
 #searchInput {
@@ -294,6 +304,8 @@ input:checked + .slider:before {
     background: var(--bg-primary);
     border-right: 1px solid var(--border-primary);
     overflow-y: auto;
+    display: flex;
+    flex-direction: column;
 }
 
 #requestTable {
@@ -406,6 +418,7 @@ body.column-resizing * {
     display: flex;
     border-bottom: 1px solid var(--border-primary);
     background: var(--bg-tertiary);
+    flex-wrap: wrap;
 }
 
 .tab-btn {
@@ -415,6 +428,7 @@ body.column-resizing * {
     cursor: pointer;
     border-bottom: 2px solid transparent;
     color: var(--text-primary);
+    white-space: nowrap;
 }
 
 .tab-btn.active {
@@ -434,6 +448,8 @@ body.column-resizing * {
     border-bottom: 1px solid var(--border-secondary);
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
 }
 
 .view-btn {
@@ -444,6 +460,7 @@ body.column-resizing * {
     cursor: pointer;
     font-size: 11px;
     color: var(--text-primary);
+    white-space: nowrap;
 }
 
 .view-btn.active {
@@ -461,6 +478,7 @@ body.column-resizing * {
     border-radius: 3px;
     cursor: pointer;
     font-size: 11px;
+    white-space: nowrap;
 }
 
 .copy-curl-btn:hover {
@@ -476,10 +494,27 @@ body.column-resizing * {
     border-radius: 3px;
     cursor: pointer;
     font-size: 11px;
+    white-space: nowrap;
 }
 
 .repeater-btn:hover {
     background: var(--purple-hover);
+}
+
+.decoder-btn {
+    margin-left: 10px;
+    padding: 4px 10px;
+    background: var(--orange-bg);
+    color: var(--text-inverse);
+    border: 1px solid var(--orange-hover);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.decoder-btn:hover {
+    background: var(--orange-hover);
 }
 
 .copy-content-btn {
@@ -491,6 +526,7 @@ body.column-resizing * {
     border-radius: 3px;
     cursor: pointer;
     font-size: 11px;
+    white-space: nowrap;
 }
 
 .copy-content-btn:hover {
@@ -624,6 +660,7 @@ mark {
     justify-content: space-between;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
 }
 
 .primary-actions {
@@ -646,6 +683,15 @@ mark {
 }
 
 .repeater-modal {
+    width: 90%;
+    max-width: 1200px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.decoder-modal {
     width: 90%;
     max-width: 1200px;
     max-height: 80vh;
@@ -682,10 +728,21 @@ mark {
     padding-right: 10px;
 }
 
+.decoder-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 10px;
+    gap: 15px;
+}
+
 .repeater-content-wrapper {
     display: flex;
     gap: 20px;
     min-height: 100%;
+    flex-wrap: wrap;
 }
 
 .repeater-request,
@@ -693,6 +750,7 @@ mark {
     flex: 1;
     display: flex;
     flex-direction: column;
+    min-width: 300px;
 }
 
 .repeater-request h3,
@@ -707,6 +765,7 @@ mark {
     margin-top: 15px;
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
 }
 
 .response-status {
@@ -758,6 +817,7 @@ mark {
     border: 1px solid var(--border-primary);
     border-radius: 3px;
     padding: 10px;
+    min-height: 200px;
 }
 
 .response-content pre {
@@ -1002,4 +1062,140 @@ mark {
     border-radius: 3px;
     background: var(--bg-primary);
     min-height: 400px;
+}
+
+/* Decoder Styles */
+.decoder-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 200px;
+}
+
+.decoder-section textarea {
+    flex: 1;
+    padding: 10px;
+    border: 1px solid var(--input-border);
+    border-radius: 3px;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    resize: none;
+    background: var(--input-bg);
+    color: var(--text-primary);
+}
+
+.decoder-section textarea:focus {
+    outline: none;
+    border-color: var(--success-bg);
+    box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.2);
+}
+
+.decoder-actions-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-top: 1px solid var(--border-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    background: var(--bg-tertiary);
+    margin: 10px 0;
+}
+
+.action-group {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 0 10px;
+}
+
+.decoder-controls {
+    display: flex;
+    gap: 5px;
+}
+
+#decoderOperation {
+    padding: 6px;
+    border: 1px solid var(--button-border);
+    border-radius: 3px;
+    background: var(--button-bg);
+    color: var(--text-primary);
+}
+
+.queue-count {
+    margin-left: 10px;
+    font-size: 12px;
+    padding: 2px 6px;
+    background-color: var(--warning-bg);
+    color: var(--text-inverse);
+    border-radius: 10px;
+    display: none;
+}
+
+.queue-count.visible {
+    display: inline-block;
+}
+
+/* Responsive adjustments for docked side-by-side view */
+@media (max-width: 700px) {
+    .main-content {
+        flex-direction: column;
+    }
+
+    .request-list-container {
+        border-right: none;
+        border-bottom: 1px solid var(--border-primary);
+        flex: 1;
+        min-height: 200px;
+    }
+
+    .request-details {
+        flex: 1;
+        border-left: none;
+    }
+    
+    .header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+    
+    .controls {
+        flex-wrap: wrap;
+        width: 100%;
+        justify-content: flex-start;
+    }
+    
+    .search-container {
+        width: 100%;
+        max-width: none;
+    }
+    
+    /* Make view buttons stack or scroll if really narrow */
+    .view-toggle {
+        overflow-x: auto;
+        padding-bottom: 5px;
+    }
+    
+    .copy-curl-btn, 
+    .repeater-btn, 
+    .decoder-btn,
+    .copy-content-btn {
+        margin-left: 5px;
+    }
+    
+    .content-search {
+        margin-left: 0;
+        margin-top: 5px;
+        width: 100%;
+    }
+    
+    .content-search-input {
+        width: 100%;
+        flex: 1;
+    }
+    
+    /* Repeater layout vertical on small screens */
+    .repeater-content-wrapper {
+        flex-direction: column;
+    }
 }

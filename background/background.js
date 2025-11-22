@@ -39,6 +39,50 @@ browser.browserAction.onClicked.addListener(() => {
   notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
 });
 
+
+browser.runtime.onInstalled.addListener(() => {
+  browser.contextMenus.create({
+    id: "toggle-capture",
+    title: "Toggle Capture",
+    contexts: ["all"]
+  });
+  browser.contextMenus.create({
+    id: "toggle-intercept",
+    title: "Toggle Intercept",
+    contexts: ["all"]
+  });
+  browser.contextMenus.create({
+    id: "send-to-decoder",
+    title: "Send to Decoder",
+    contexts: ["selection"]
+  });
+});
+
+browser.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "toggle-capture") {
+    captureEnabled = !captureEnabled;
+    if (!captureEnabled && interceptEnabled) {
+      interceptEnabled = false;
+      notifyDevTools({ type: 'interceptStateChanged', enabled: false });
+    }
+    updateIcon();
+    notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
+  } else if (info.menuItemId === "toggle-intercept") {
+    interceptEnabled = !interceptEnabled;
+    if (interceptEnabled && !captureEnabled) {
+      captureEnabled = true;
+      notifyDevTools({ type: 'captureStateChanged', enabled: true });
+    }
+    updateIcon();
+    notifyDevTools({ type: 'interceptStateChanged', enabled: interceptEnabled });
+  } else if (info.menuItemId === "send-to-decoder") {
+    notifyDevTools({ 
+      type: 'sendToDecoder', 
+      text: info.selectionText 
+    });
+  }
+});
+
 function updateIcon() {
   const iconPath = captureEnabled ? {
     16: 'icons/icon-active-16.png',

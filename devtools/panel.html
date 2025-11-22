@@ -21,6 +21,7 @@
                 </label>
                 <button id="interceptSettingsBtn" class="btn">Intercept Settings</button>
                 <button id="clearBtn" class="btn">Clear</button>
+                <button id="decoderBtn" class="btn">Decoder</button>
                 <button id="filterBtn" class="btn">Filters ▼</button>
                 <button id="themeToggleBtn" class="theme-toggle-btn" title="Toggle theme">
                     <span class="theme-icon">🌙</span>
@@ -95,6 +96,7 @@
                         <button class="view-btn" data-view="formatted">Formatted</button>
                         <button class="copy-curl-btn" id="copyCurlBtn">Copy as cURL</button>
                         <button class="repeater-btn" id="repeaterBtn">Send to Repeater</button>
+                        <button class="decoder-btn" id="sendToDecoderBtn">Send to Decoder</button>
                         <button class="copy-content-btn" id="copyRequestBtn">Copy</button>
                         <div class="content-search">
                             <input type="text" id="requestSearchInput" placeholder="Search in request..." class="content-search-input">
@@ -112,6 +114,7 @@
                         <button class="view-btn" data-view="formatted">Formatted</button>
                         <button class="copy-curl-btn" id="copyModifiedCurlBtn">Copy as cURL</button>
                         <button class="repeater-btn" id="modifiedRepeaterBtn">Send to Repeater</button>
+                        <button class="decoder-btn" id="modifiedSendToDecoderBtn">Send to Decoder</button>
                         <div class="content-search">
                             <input type="text" id="modifiedSearchInput" placeholder="Search in modified request..." class="content-search-input">
                             <span id="modifiedSearchCount" class="search-count"></span>
@@ -144,7 +147,7 @@
     <div id="interceptModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h2>Intercepted Request</h2>
+                <h2>Intercepted Request <span id="interceptQueueCount" class="queue-count"></span></h2>
                 <div class="content-search">
                     <input type="text" id="interceptSearchInput" placeholder="Search..." class="content-search-input">
                     <span id="interceptSearchCount" class="search-count"></span>
@@ -339,7 +342,7 @@
     <div id="responseInterceptModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h2>Intercepted Response</h2>
+                <h2>Intercepted Response <span id="responseQueueCount" class="queue-count"></span></h2>
                 <div class="content-search">
                     <input type="text" id="responseInterceptSearchInput" placeholder="Search..." class="content-search-input">
                     <span id="responseInterceptSearchCount" class="search-count"></span>
@@ -369,6 +372,54 @@
                 <div class="primary-actions">
                     <button class="btn btn-primary" id="forwardResponseBtn">Forward Response</button>
                     <button class="btn btn-danger" id="dropResponseBtn">Drop Response</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="decoderModal" class="modal">
+        <div class="modal-content decoder-modal">
+            <div class="modal-header">
+                <h2>Decoder</h2>
+                <button class="close-btn" id="closeDecoderBtn">&times;</button>
+            </div>
+            <div class="decoder-container">
+                <div class="decoder-section">
+                    <div class="section-header">
+                        <h3>Input</h3>
+                        <div class="decoder-controls">
+                            <button class="btn" id="decoderPasteBtn">Paste</button>
+                            <button class="btn" id="decoderClearInputBtn">Clear</button>
+                        </div>
+                    </div>
+                    <textarea id="decoderInput" placeholder="Enter text to decode/encode..."></textarea>
+                </div>
+                
+                <div class="decoder-actions-bar">
+                    <div class="action-group">
+                        <select id="decoderOperation">
+                            <option value="url">URL</option>
+                            <option value="base64">Base64</option>
+                            <option value="hex">Hex</option>
+                            <option value="html">HTML</option>
+                        </select>
+                        <button class="btn btn-primary" id="decoderEncodeBtn">Encode</button>
+                        <button class="btn btn-primary" id="decoderDecodeBtn">Decode</button>
+                    </div>
+                    <div class="action-group">
+                        <button class="btn" id="decoderSwapBtn" title="Swap Input/Output">⇅ Swap</button>
+                    </div>
+                </div>
+
+                <div class="decoder-section">
+                    <div class="section-header">
+                        <h3>Output</h3>
+                        <div class="decoder-controls">
+                            <button class="btn" id="decoderCopyBtn">Copy</button>
+                            <button class="btn" id="decoderClearOutputBtn">Clear</button>
+                        </div>
+                    </div>
+                    <textarea id="decoderOutput" readonly></textarea>
                 </div>
             </div>
         </div>

@@ -9,6 +9,7 @@
     "webRequestBlocking",
     "tabs",
     "activeTab",
+    "contextMenus",
     "storage",
     "clipboardWrite",
     "<all_urls>"

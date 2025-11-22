@@ -6,6 +6,7 @@ let currentResponseView = 'raw';
 let currentModifiedView = 'raw';
 let currentTab = 'request';
 let interceptedRequest = null;
+let interceptQueue = [];
 let hiddenTypes = new Set();
 let interceptSettings = {
     methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
@@ -16,6 +17,7 @@ let interceptSettings = {
     interceptResponses: false
 };
 let interceptedResponse = null;
+let responseQueue = [];
 let interceptHeadersEdited = false;
 let currentSortColumn = null;
 let currentSortDirection = 'asc';
@@ -728,13 +730,19 @@ port.onMessage.addListener((msg) => {
             break;
             
         case 'interceptRequest':
-            interceptedRequest = msg.request;
-            showInterceptModal(msg.request);
+            interceptQueue.push(msg.request);
+            if (!interceptedRequest) {
+                processNextIntercept();
+            }
+            updateQueueCounts();
             break;
             
         case 'interceptResponse':
-            interceptedResponse = msg.response;
-            showResponseInterceptModal(msg.response);
+            responseQueue.push(msg.response);
+            if (!interceptedResponse) {
+                processNextResponseIntercept();
+            }
+            updateQueueCounts();
             break;
             
         case 'interceptSettingsChanged':
@@ -778,8 +786,45 @@ port.onMessage.addListener((msg) => {
             interceptSettings = msg.settings;
             updateInterceptSettingsUI();
             break;
+            
+        case 'sendToDecoder':
+            showDecoderModal(msg.text);
+            break;
     }
 });
+
+function processNextIntercept() {
+    if (interceptQueue.length > 0) {
+        const nextRequest = interceptQueue.shift();
+        interceptedRequest = nextRequest;
+        showInterceptModal(nextRequest);
+    }
+    updateQueueCounts();
+}
+
+function processNextResponseIntercept() {
+    if (responseQueue.length > 0) {
+        const nextResponse = responseQueue.shift();
+        interceptedResponse = nextResponse;
+        showResponseInterceptModal(nextResponse);
+    }
+    updateQueueCounts();
+}
+
+function updateQueueCounts() {
+    const requestCount = document.getElementById('interceptQueueCount');
+    const responseCount = document.getElementById('responseQueueCount');
+    
+    if (requestCount) {
+        requestCount.textContent = interceptQueue.length > 0 ? `+${interceptQueue.length} pending` : '';
+        requestCount.classList.toggle('visible', interceptQueue.length > 0);
+    }
+    
+    if (responseCount) {
+        responseCount.textContent = responseQueue.length > 0 ? `+${responseQueue.length} pending` : '';
+        responseCount.classList.toggle('visible', responseQueue.length > 0);
+    }
+}
 
 function updateSortIndicators() {
     document.querySelectorAll('#requestTable th[data-column]').forEach(th => {
@@ -1382,9 +1427,14 @@ function showInterceptModal(request) {
 }
 
 function closeInterceptModal() {
-    interceptModal.classList.remove('show');
-    interceptedRequest = null;
-    interceptHeadersEdited = false;
+    if (interceptQueue.length > 0) {
+        processNextIntercept();
+    } else {
+        interceptModal.classList.remove('show');
+        interceptedRequest = null;
+        interceptHeadersEdited = false;
+    }
+    updateQueueCounts();
 }
 
 function formatHeaders(headers) {
@@ -1811,6 +1861,184 @@ function showResponseInterceptModal(response) {
 }
 
 function closeResponseInterceptModal() {
-    responseInterceptModal.classList.remove('show');
-    interceptedResponse = null;
+    if (responseQueue.length > 0) {
+        processNextResponseIntercept();
+    } else {
+        responseInterceptModal.classList.remove('show');
+        interceptedResponse = null;
+    }
+    updateQueueCounts();
+}
+
+// Decoder Elements
+const decoderBtn = document.getElementById('decoderBtn');
+const decoderModal = document.getElementById('decoderModal');
+const closeDecoderBtn = document.getElementById('closeDecoderBtn');
+const decoderInput = document.getElementById('decoderInput');
+const decoderOutput = document.getElementById('decoderOutput');
+const decoderOperation = document.getElementById('decoderOperation');
+const decoderEncodeBtn = document.getElementById('decoderEncodeBtn');
+const decoderDecodeBtn = document.getElementById('decoderDecodeBtn');
+const decoderPasteBtn = document.getElementById('decoderPasteBtn');
+const decoderClearInputBtn = document.getElementById('decoderClearInputBtn');
+const decoderClearOutputBtn = document.getElementById('decoderClearOutputBtn');
+const decoderCopyBtn = document.getElementById('decoderCopyBtn');
+const decoderSwapBtn = document.getElementById('decoderSwapBtn');
+
+// Decoder Event Listeners
+decoderBtn.addEventListener('click', () => {
+    showDecoderModal();
+});
+
+closeDecoderBtn.addEventListener('click', () => {
+    decoderModal.classList.remove('show');
+});
+
+document.getElementById('sendToDecoderBtn').addEventListener('click', () => {
+    if (selectedRequest) {
+        const content = formatRequestContent(selectedRequest, 'raw');
+        showDecoderModal(content);
+    }
+});
+
+document.getElementById('modifiedSendToDecoderBtn').addEventListener('click', () => {
+    if (selectedRequest && selectedRequest.wasModified) {
+        const content = formatModifiedRequestContent(selectedRequest, 'raw');
+        showDecoderModal(content);
+    }
+});
+
+decoderPasteBtn.addEventListener('click', async () => {
+    try {
+        const text = await navigator.clipboard.readText();
+        decoderInput.value = text;
+    } catch (err) {
+        console.error('Failed to read clipboard:', err);
+    }
+});
+
+decoderClearInputBtn.addEventListener('click', () => {
+    decoderInput.value = '';
+});
+
+decoderClearOutputBtn.addEventListener('click', () => {
+    decoderOutput.value = '';
+});
+
+decoderCopyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(decoderOutput.value).then(() => {
+        const originalText = decoderCopyBtn.textContent;
+        decoderCopyBtn.textContent = 'Copied!';
+        setTimeout(() => {
+            decoderCopyBtn.textContent = originalText;
+        }, 2000);
+    });
+});
+
+decoderSwapBtn.addEventListener('click', () => {
+    const input = decoderInput.value;
+    const output = decoderOutput.value;
+    decoderInput.value = output;
+    decoderOutput.value = input;
+});
+
+decoderEncodeBtn.addEventListener('click', () => {
+    performEncoding();
+});
+
+decoderDecodeBtn.addEventListener('click', () => {
+    performDecoding();
+});
+
+function showDecoderModal(initialText = '') {
+    if (initialText) {
+        decoderInput.value = initialText;
+    }
+    decoderModal.classList.add('show');
+}
+
+function performEncoding() {
+    const input = decoderInput.value;
+    const operation = decoderOperation.value;
+    let output = '';
+
+    try {
+        switch (operation) {
+            case 'url':
+                output = encodeURIComponent(input);
+                break;
+            case 'base64':
+                output = btoa(input);
+                break;
+            case 'hex':
+                output = stringToHex(input);
+                break;
+            case 'html':
+                output = escapeHTML(input);
+                break;
+        }
+        decoderOutput.value = output;
+    } catch (e) {
+        decoderOutput.value = `Error encoding: ${e.message}`;
+    }
+}
+
+function performDecoding() {
+    const input = decoderInput.value;
+    const operation = decoderOperation.value;
+    let output = '';
+
+    try {
+        switch (operation) {
+            case 'url':
+                output = decodeURIComponent(input);
+                break;
+            case 'base64':
+                output = atob(input);
+                break;
+            case 'hex':
+                output = hexToString(input);
+                break;
+            case 'html':
+                output = unescapeHTML(input);
+                break;
+        }
+        decoderOutput.value = output;
+    } catch (e) {
+        decoderOutput.value = `Error decoding: ${e.message}`;
+    }
+}
+
+function stringToHex(str) {
+    let hex = '';
+    for (let i = 0; i < str.length; i++) {
+        hex += '' + str.charCodeAt(i).toString(16).padStart(2, '0');
+    }
+    return hex;
+}
+
+function hexToString(hex) {
+    let str = '';
+    for (let i = 0; i < hex.length; i += 2) {
+        str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+    }
+    return str;
+}
+
+function escapeHTML(str) {
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function unescapeHTML(str) {
+    return str
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&#039;/g, "'");
 }
