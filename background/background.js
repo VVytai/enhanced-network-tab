@@ -50,6 +50,10 @@ browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
 
 browser.browserAction.onClicked.addListener(() => {
   captureEnabled = !captureEnabled;
+  // Save capture state to storage
+  browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
+    console.error('Failed to save capture state:', err);
+  });
   updateIcon();
   notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
 });
@@ -80,12 +84,19 @@ browser.contextMenus.onClicked.addListener((info, tab) => {
       interceptEnabled = false;
       notifyDevTools({ type: 'interceptStateChanged', enabled: false });
     }
+    // Save capture state to storage
+    browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
+      console.error('Failed to save capture state:', err);
+    });
     updateIcon();
     notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
   } else if (info.menuItemId === "toggle-intercept") {
     interceptEnabled = !interceptEnabled;
     if (interceptEnabled && !captureEnabled) {
       captureEnabled = true;
+      browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
+        console.error('Failed to save capture state:', err);
+      });
       notifyDevTools({ type: 'captureStateChanged', enabled: true });
     }
     updateIcon();
