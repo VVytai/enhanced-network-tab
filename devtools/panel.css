@@ -240,6 +240,25 @@ input:checked + .slider:before {
     background: var(--error-hover);
 }
 
+.btn.confirm-state {
+    background: var(--warning-bg);
+    border-color: var(--warning-border);
+    color: var(--text-inverse);
+}
+
+.btn.confirm-state:hover {
+    background: var(--warning-hover);
+}
+
+.icon-btn {
+    min-width: 36px;
+    padding: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+}
+
 .search-container {
     flex: 1;
     max-width: 300px;
@@ -680,6 +699,103 @@ mark {
 
 .disable-intercept-btn:hover {
     background: var(--warning-hover);
+}
+
+/* Highlighting Rules */
+.rules-list {
+    margin-bottom: 20px;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.rule-item {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+    background: #fff;
+}
+
+.rule-item:last-child {
+    border-bottom: none;
+}
+
+.rule-pattern {
+    flex: 1;
+    font-family: monospace;
+    margin-right: 10px;
+}
+
+.rule-color-preview {
+    width: 24px;
+    height: 24px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    margin-right: 10px;
+}
+
+.rule-delete-btn {
+    background: none;
+    border: none;
+    color: #f44336;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 5px;
+}
+
+.add-rule-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 15px;
+}
+
+.add-rule-form input[type="text"] {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    background: var(--input-bg);
+    color: var(--text-primary);
+}
+
+.rule-type-select {
+    padding: 8px;
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    background: var(--input-bg);
+    color: var(--text-primary);
+    margin-right: 5px;
+}
+
+.add-rule-form input[type="color"] {
+    width: 40px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    background: none;
+}
+
+/* Dark Mode Styles for Rules */
+body.dark-mode .rules-list {
+    border-color: #444;
+}
+
+body.dark-mode .rule-item {
+    background: #2d2d2d;
+    border-bottom-color: #444;
+}
+
+body.dark-mode .rule-item span {
+    color: #e0e0e0;
+}
+
+body.dark-mode .add-rule-form input[type="text"] {
+    background-color: #2d2d2d;
+    border-color: #444;
+    color: #e0e0e0;
 }
 
 .repeater-modal {
@@ -1173,3 +1289,97 @@ mark {
         flex-direction: column;
     }
 }
+
+/* Highlighting & Match/Replace Rules Styles */
+.rules-list {
+    margin-bottom: 20px;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-primary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+}
+
+.rule-item {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid var(--border-secondary);
+}
+
+.rule-item:last-child {
+    border-bottom: none;
+}
+
+.rule-pattern {
+    flex: 1;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    margin-right: 10px;
+    word-break: break-all;
+    color: var(--text-primary);
+}
+
+.rule-color-preview {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-primary);
+    border-radius: 4px;
+    margin-right: 10px;
+}
+
+.rule-delete-btn {
+    background: none;
+    border: none;
+    color: var(--error-text);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 5px;
+}
+
+.rule-delete-btn:hover {
+    color: var(--error-hover);
+}
+
+.add-rule-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 15px;
+}
+
+.add-rule-form input[type="text"] {
+    flex: 1;
+}
+
+.add-rule-form input[type="color"] {
+    width: 40px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+}
+
+/* Syntax Highlighting */
+.syntax-key { color: #d32f2f; } /* Red for JSON keys */
+.syntax-string { color: #2e7d32; } /* Green for strings */
+.syntax-number { color: #1565c0; } /* Blue for numbers */
+.syntax-boolean { color: #7b1fa2; } /* Purple for booleans */
+.syntax-null { color: #757575; } /* Grey for null */
+
+.syntax-tag { color: #1565c0; } /* Blue for XML/HTML tags */
+.syntax-attr { color: #d32f2f; } /* Red for attributes */
+.syntax-value { color: #2e7d32; } /* Green for attribute values */
+.syntax-comment { color: #757575; font-style: italic; }
+
+/* Dark Mode Syntax Highlighting */
+body.dark-mode .syntax-key { color: #ff7b72; }
+body.dark-mode .syntax-string { color: #a5d6a7; }
+body.dark-mode .syntax-number { color: #79c0ff; }
+body.dark-mode .syntax-boolean { color: #d2a8ff; }
+body.dark-mode .syntax-null { color: #8b949e; }
+
+body.dark-mode .syntax-tag { color: #79c0ff; }
+body.dark-mode .syntax-attr { color: #ff7b72; }
+body.dark-mode .syntax-value { color: #a5d6a7; }
+body.dark-mode .syntax-comment { color: #8b949e; }

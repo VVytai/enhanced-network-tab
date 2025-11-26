@@ -26,6 +26,12 @@
                 <button id="themeToggleBtn" class="theme-toggle-btn" title="Toggle theme">
                     <span class="theme-icon">🌙</span>
                 </button>
+                <button id="highlightRulesBtn" class="btn icon-btn" title="Highlighting Rules">
+                    <span>🎨</span>
+                </button>
+                <button id="matchReplaceBtn" class="btn icon-btn" title="Match & Replace">
+                    <span>⇄</span>
+                </button>
             </div>
             <div class="search-container">
                 <input type="text" id="searchInput" placeholder="Search requests...">
@@ -139,6 +145,39 @@
                     <div class="content-area">
                         <pre id="responseContent"></pre>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="highlightRulesModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Highlighting Rules</h2>
+                <button class="close-btn" id="closeHighlightRulesBtn">&times;</button>
+            </div>
+            <div class="settings-container">
+                <div class="setting-section">
+                    <p class="setting-description">Define rules to highlight requests based on URL patterns.</p>
+                    <div class="rules-list" id="highlightRulesList">
+                        <!-- Rules will be added here -->
+                    </div>
+                    <div class="add-rule-form">
+                        <input type="text" id="newRulePattern" placeholder="Pattern (e.g. /api/v1)">
+                        <select id="newRuleType" class="rule-type-select">
+                            <option value="regex">Regex</option>
+                            <option value="contains">Contains</option>
+                            <option value="starts_with">Starts With</option>
+                            <option value="ends_with">Ends With</option>
+                            <option value="exact">Exact Match</option>
+                        </select>
+                        <input type="color" id="newRuleColor" value="#ffeb3b">
+                        <button class="btn btn-primary" id="addHighlightRuleBtn">Add Rule</button>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn btn-danger" id="clearHighlightRulesBtn" style="margin-right: 10px;">Clear All</button>
+                    <button class="btn btn-primary" id="saveHighlightRulesBtn">Save Rules</button>
                 </div>
             </div>
         </div>
@@ -266,6 +305,21 @@
             </div>
             <div class="settings-container">
                 <div class="setting-section">
+                    <h3>Scope Control</h3>
+                    <label class="method-checkbox">
+                        <input type="checkbox" id="enableScope">
+                        <span>Enable Scope Control (Global Filter)</span>
+                    </label>
+                    <p class="setting-description">Requests outside of scope are completely ignored by the extension (not logged or intercepted).</p>
+                    
+                    <p class="setting-description" style="margin-top: 10px;"><strong>Include Patterns</strong> (whitelist - regex, one per line):</p>
+                    <textarea id="scopePatterns" rows="3" placeholder="Example: .*\\.example\\.com.*&#10;.*\\/api\\/v1\\/.*"></textarea>
+                    
+                    <p class="setting-description" style="margin-top: 10px;"><strong>Exclude Patterns</strong> (blacklist - regex, one per line):</p>
+                    <textarea id="scopeExcludePatterns" rows="3" placeholder="Example: .*\\/analytics\\/.*&#10;.*\\/ads\\/.*"></textarea>
+                </div>
+
+                <div class="setting-section">
                     <h3>HTTP Methods to Intercept</h3>
                     <div class="method-checkboxes">
                         <label class="method-checkbox">
@@ -303,14 +357,14 @@
                 </div>
                 
                 <div class="setting-section">
-                    <h3>URL Patterns to Include</h3>
-                    <p class="setting-description">Only intercept requests matching these regex patterns (leave empty to intercept all):</p>
+                    <h3>URL Patterns to Include (Intercept)</h3>
+                    <p class="setting-description">Only intercept requests matching these regex patterns. (Note: Requests must first pass Scope Control).</p>
                     <textarea id="includePatterns" rows="3" placeholder="Example: api\\.example\\.com.*&#10;.*\\/api\\/.*"></textarea>
                 </div>
                 
                 <div class="setting-section">
-                    <h3>URL Patterns to Exclude</h3>
-                    <p class="setting-description">Never intercept requests matching these regex patterns:</p>
+                    <h3>URL Patterns to Exclude (Intercept)</h3>
+                    <p class="setting-description">Never intercept requests matching these regex patterns (even if they are in scope).</p>
                     <textarea id="excludePatterns" rows="3" placeholder="Example: .*\\.(js|css|png|jpg|gif)$&#10;.*\\/static\\/.*"></textarea>
                 </div>
                 
@@ -418,6 +472,7 @@
                             <option value="base64">Base64</option>
                             <option value="hex">Hex</option>
                             <option value="html">HTML</option>
+                            <option value="jwt">JWT</option>
                         </select>
                         <button class="btn btn-primary" id="decoderEncodeBtn">Encode</button>
                         <button class="btn btn-primary" id="decoderDecodeBtn">Decode</button>
@@ -441,6 +496,63 @@
         </div>
     </div>
     
+    <div id="matchReplaceModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Match & Replace Rules</h2>
+                <button class="close-btn" id="closeMatchReplaceBtn">&times;</button>
+            </div>
+            <div class="settings-container">
+                <div class="setting-section">
+                    <p class="setting-description">Automatically replace content in requests matching patterns.</p>
+                    <div class="get-warning" style="margin-bottom: 15px;">
+                        <p><strong>⚠️ Note:</strong> Header modifications are applied natively. URL or Body modifications may require cancelling and resending the request, which means the original page might not receive the response.</p>
+                    </div>
+                    <div class="rules-list" id="matchReplaceRulesList">
+                        <!-- Rules will be added here -->
+                    </div>
+                    
+                    <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 15px;">
+                        <h3>Add New Rule</h3>
+                        <div class="editor-row">
+                            <label>Match Type:</label>
+                            <select id="mrMatchType">
+                                <option value="regex">Regex</option>
+                                <option value="contains">Contains</option>
+                                <option value="starts_with">Starts With</option>
+                                <option value="ends_with">Ends With</option>
+                                <option value="exact">Exact Match</option>
+                            </select>
+                        </div>
+                        <div class="editor-row">
+                            <label>Match Pattern:</label>
+                            <input type="text" id="mrMatchPattern" placeholder="e.g. https://api.prod.com">
+                        </div>
+                        <div class="editor-row">
+                            <label>Replace With:</label>
+                            <input type="text" id="mrReplaceValue" placeholder="e.g. https://api.dev.com">
+                        </div>
+                        <div class="editor-row">
+                            <label>Target:</label>
+                            <select id="mrTarget">
+                                <option value="url">URL</option>
+                                <option value="headers">Headers</option>
+                                <option value="body">Body</option>
+                            </select>
+                        </div>
+                        <div class="editor-row" style="text-align: right;">
+                            <button class="btn btn-primary" id="addMatchReplaceRuleBtn">Add Rule</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn btn-danger" id="clearMatchReplaceRulesBtn" style="margin-right: 10px;">Clear All</button>
+                    <button class="btn btn-primary" id="saveMatchReplaceRulesBtn">Save & Apply Rules</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="panel.js"></script>
 </body>
 </html>

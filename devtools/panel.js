@@ -26,6 +26,8 @@ let interceptHeadersEdited = false;
 let currentSortColumn = null;
 let currentSortDirection = 'asc';
 let requestCounter = 0;
+let highlightRules = [];
+let matchReplaceRules = [];
 
 // Theme Management
 let currentTheme = 'auto'; // 'auto', 'light', or 'dark'
@@ -137,8 +139,33 @@ function toggleTheme() {
 
 // Column Resizing Functions
 function initializeColumnResizing() {
-    // Load and apply saved column widths
+    // Load saved column widths
     applyColumnWidths();
+    
+    // Load highlight rules
+    const savedRules = localStorage.getItem('highlightRules');
+    if (savedRules) {
+        try {
+            highlightRules = JSON.parse(savedRules);
+        } catch (e) {
+            console.error('Failed to parse highlight rules:', e);
+        }
+    }
+
+    // Load Match & Replace rules
+    const savedMRRules = localStorage.getItem('matchReplaceRules');
+    if (savedMRRules) {
+        try {
+            matchReplaceRules = JSON.parse(savedMRRules);
+            // Sync with background
+            port.postMessage({
+                type: 'updateMatchReplaceRules',
+                rules: matchReplaceRules
+            });
+        } catch (e) {
+            console.error('Failed to parse match & replace rules:', e);
+        }
+    }
     
     // Get all column resizers
     const resizers = document.querySelectorAll('.column-resizer');
@@ -308,8 +335,270 @@ const themeToggleBtn = document.getElementById('themeToggleBtn');
 const copyRequestBtn = document.getElementById('copyRequestBtn');
 const copyResponseBtn = document.getElementById('copyResponseBtn');
 const responsePreviewBtn = document.getElementById('responsePreviewBtn');
+const highlightRulesBtn = document.getElementById('highlightRulesBtn');
+const highlightRulesModal = document.getElementById('highlightRulesModal');
+const closeHighlightRulesBtn = document.getElementById('closeHighlightRulesBtn');
+const addHighlightRuleBtn = document.getElementById('addHighlightRuleBtn');
+const saveHighlightRulesBtn = document.getElementById('saveHighlightRulesBtn');
+const clearHighlightRulesBtn = document.getElementById('clearHighlightRulesBtn');
+const highlightRulesList = document.getElementById('highlightRulesList');
+
+const matchReplaceBtn = document.getElementById('matchReplaceBtn');
+const matchReplaceModal = document.getElementById('matchReplaceModal');
+const closeMatchReplaceBtn = document.getElementById('closeMatchReplaceBtn');
+const addMatchReplaceRuleBtn = document.getElementById('addMatchReplaceRuleBtn');
+const saveMatchReplaceRulesBtn = document.getElementById('saveMatchReplaceRulesBtn');
+const clearMatchReplaceRulesBtn = document.getElementById('clearMatchReplaceRulesBtn');
+const matchReplaceRulesList = document.getElementById('matchReplaceRulesList');
+
 let currentRepeaterTab = 'headers';
 let lastRepeaterResponse = null;
+
+// Highlight Rules Event Listeners
+highlightRulesBtn.addEventListener('click', () => {
+    renderHighlightRules();
+    highlightRulesModal.classList.add('show');
+});
+
+closeHighlightRulesBtn.addEventListener('click', () => {
+    highlightRulesModal.classList.remove('show');
+});
+
+addHighlightRuleBtn.addEventListener('click', () => {
+    const pattern = document.getElementById('newRulePattern').value.trim();
+    const color = document.getElementById('newRuleColor').value;
+    const type = document.getElementById('newRuleType').value;
+    
+    if (!pattern) {
+        alert('Please enter a pattern');
+        return;
+    }
+    
+    if (type === 'regex') {
+        try {
+            new RegExp(pattern);
+        } catch (e) {
+            alert('Invalid regex pattern: ' + e.message);
+            return;
+        }
+    }
+    
+    highlightRules.push({ pattern, color, type, enabled: true });
+    document.getElementById('newRulePattern').value = '';
+    renderHighlightRules();
+    saveHighlightRules();
+});
+
+// Match & Replace Event Listeners
+matchReplaceBtn.addEventListener('click', () => {
+    renderMatchReplaceRules();
+    matchReplaceModal.classList.add('show');
+});
+
+closeMatchReplaceBtn.addEventListener('click', () => {
+    matchReplaceModal.classList.remove('show');
+});
+
+addMatchReplaceRuleBtn.addEventListener('click', () => {
+    const matchPattern = document.getElementById('mrMatchPattern').value.trim();
+    const replaceValue = document.getElementById('mrReplaceValue').value;
+    const target = document.getElementById('mrTarget').value;
+    const matchType = document.getElementById('mrMatchType').value;
+    
+    if (!matchPattern) {
+        alert('Please enter a match pattern');
+        return;
+    }
+    
+    // Check both settings object and DOM element to be safe
+    const earlyInterceptEnabled = interceptSettings.useEarlyInterception || document.getElementById('useEarlyInterception').checked;
+    
+    if (target === 'body' && !earlyInterceptEnabled) {
+        alert('Notice: Body modification requires the request to be cancelled and resent. The original page might see the request as cancelled, but the server will receive the modified request.');
+    }
+    
+    if (matchType === 'regex') {
+        try {
+            new RegExp(matchPattern);
+        } catch (e) {
+            alert('Invalid regex pattern: ' + e.message);
+            return;
+        }
+    }
+    
+    matchReplaceRules.push({ 
+        matchPattern, 
+        replaceValue, 
+        target,
+        matchType,
+        enabled: true,
+        id: Date.now().toString()
+    });
+    
+    // Clear form
+    document.getElementById('mrMatchPattern').value = '';
+    document.getElementById('mrReplaceValue').value = '';
+    
+    renderMatchReplaceRules();
+});
+
+saveMatchReplaceRulesBtn.addEventListener('click', () => {
+    saveMatchReplaceRules();
+    matchReplaceModal.classList.remove('show');
+});
+
+clearMatchReplaceRulesBtn.addEventListener('click', () => {
+    if (clearMatchReplaceRulesBtn.textContent === 'Confirm?') {
+        matchReplaceRules = [];
+        renderMatchReplaceRules();
+        saveMatchReplaceRules();
+        clearMatchReplaceRulesBtn.textContent = 'Clear All';
+        clearMatchReplaceRulesBtn.classList.remove('confirm-state');
+    } else {
+        const originalText = clearMatchReplaceRulesBtn.textContent;
+        clearMatchReplaceRulesBtn.textContent = 'Confirm?';
+        clearMatchReplaceRulesBtn.classList.add('confirm-state');
+        
+        setTimeout(() => {
+            if (clearMatchReplaceRulesBtn.textContent === 'Confirm?') {
+                clearMatchReplaceRulesBtn.textContent = originalText;
+                clearMatchReplaceRulesBtn.classList.remove('confirm-state');
+            }
+        }, 3000);
+    }
+});
+
+function renderMatchReplaceRules() {
+    matchReplaceRulesList.innerHTML = '';
+    
+    if (matchReplaceRules.length === 0) {
+        matchReplaceRulesList.innerHTML = '<div style="padding:10px;color:#888;">No rules defined</div>';
+        return;
+    }
+    
+    matchReplaceRules.forEach((rule, index) => {
+        const item = document.createElement('div');
+        item.className = 'rule-item';
+        item.style.flexDirection = 'column';
+        item.style.alignItems = 'flex-start';
+        
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.width = '100%';
+        header.style.justifyContent = 'space-between';
+        header.style.marginBottom = '5px';
+        
+        const title = document.createElement('span');
+        const typeLabel = rule.matchType ? `[${rule.matchType}] ` : '[regex] ';
+        title.innerHTML = `<strong>${rule.target.toUpperCase()}</strong>: <small>${typeLabel}</small><code>${escapeHTML(rule.matchPattern)}</code> → <code>${escapeHTML(rule.replaceValue)}</code>`;
+        
+        const controls = document.createElement('div');
+        
+        const toggleCheck = document.createElement('input');
+        toggleCheck.type = 'checkbox';
+        toggleCheck.checked = rule.enabled;
+        toggleCheck.style.marginRight = '10px';
+        toggleCheck.onchange = () => {
+            rule.enabled = toggleCheck.checked;
+            saveMatchReplaceRules();
+        };
+        
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'rule-delete-btn';
+        deleteBtn.innerHTML = '&times;';
+        deleteBtn.onclick = () => {
+            matchReplaceRules.splice(index, 1);
+            renderMatchReplaceRules();
+        };
+        
+        controls.appendChild(toggleCheck);
+        controls.appendChild(deleteBtn);
+        
+        header.appendChild(title);
+        header.appendChild(controls);
+        
+        item.appendChild(header);
+        matchReplaceRulesList.appendChild(item);
+    });
+}
+
+function saveMatchReplaceRules() {
+    localStorage.setItem('matchReplaceRules', JSON.stringify(matchReplaceRules));
+    port.postMessage({
+        type: 'updateMatchReplaceRules',
+        rules: matchReplaceRules
+    });
+}
+
+saveHighlightRulesBtn.addEventListener('click', () => {
+    saveHighlightRules();
+    highlightRulesModal.classList.remove('show');
+    renderRequestList();
+});
+
+clearHighlightRulesBtn.addEventListener('click', () => {
+    if (clearHighlightRulesBtn.textContent === 'Confirm?') {
+        highlightRules = [];
+        renderHighlightRules();
+        saveHighlightRules();
+        renderRequestList();
+        clearHighlightRulesBtn.textContent = 'Clear All';
+        clearHighlightRulesBtn.classList.remove('confirm-state');
+    } else {
+        const originalText = clearHighlightRulesBtn.textContent;
+        clearHighlightRulesBtn.textContent = 'Confirm?';
+        clearHighlightRulesBtn.classList.add('confirm-state');
+        
+        setTimeout(() => {
+            if (clearHighlightRulesBtn.textContent === 'Confirm?') {
+                clearHighlightRulesBtn.textContent = originalText;
+                clearHighlightRulesBtn.classList.remove('confirm-state');
+            }
+        }, 3000);
+    }
+});
+
+function renderHighlightRules() {
+    highlightRulesList.innerHTML = '';
+    
+    if (highlightRules.length === 0) {
+        highlightRulesList.innerHTML = '<div style="padding:10px;color:#888;">No rules defined</div>';
+        return;
+    }
+    
+    highlightRules.forEach((rule, index) => {
+        const item = document.createElement('div');
+        item.className = 'rule-item';
+        
+        const colorPreview = document.createElement('div');
+        colorPreview.className = 'rule-color-preview';
+        colorPreview.style.backgroundColor = rule.color;
+        
+        const patternText = document.createElement('span');
+        patternText.className = 'rule-pattern';
+        const typeLabel = rule.type ? `[${rule.type}] ` : '[regex] ';
+        patternText.textContent = typeLabel + rule.pattern;
+        
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'rule-delete-btn';
+        deleteBtn.innerHTML = '&times;';
+        deleteBtn.onclick = () => {
+            highlightRules.splice(index, 1);
+            renderHighlightRules();
+            saveHighlightRules();
+        };
+        
+        item.appendChild(colorPreview);
+        item.appendChild(patternText);
+        item.appendChild(deleteBtn);
+        
+        highlightRulesList.appendChild(item);
+    });
+}
+
+function saveHighlightRules() {
+    localStorage.setItem('highlightRules', JSON.stringify(highlightRules));
+}
 
 captureToggle.addEventListener('change', () => {
     // If capture is turned off, also turn off intercept
@@ -948,6 +1237,45 @@ function renderRequestList() {
     sortedRequests.forEach(req => {
         const row = document.createElement('tr');
         
+        // Apply highlighting rules
+        for (const rule of highlightRules) {
+            try {
+                if (rule.enabled) {
+                    let isMatch = false;
+                    const type = rule.type || 'regex';
+                    const pattern = rule.pattern;
+                    const target = req.url; // Highlighting only targets URL currently
+                    
+                    if (!target) continue;
+
+                    switch (type) {
+                        case 'regex':
+                            isMatch = new RegExp(pattern).test(target);
+                            break;
+                        case 'contains':
+                            isMatch = target.includes(pattern);
+                            break;
+                        case 'starts_with':
+                            isMatch = target.startsWith(pattern);
+                            break;
+                        case 'ends_with':
+                            isMatch = target.endsWith(pattern);
+                            break;
+                        case 'exact':
+                            isMatch = target === pattern;
+                            break;
+                    }
+
+                    if (isMatch) {
+                        row.style.backgroundColor = rule.color + '40'; // Add 25% opacity
+                        break; // Apply first matching rule
+                    }
+                }
+            } catch (e) {
+                console.error('Invalid highlight rule pattern:', rule.pattern);
+            }
+        }
+        
         if (selectedRequest && selectedRequest.id === req.id) {
             row.classList.add('selected');
         }
@@ -981,6 +1309,16 @@ function renderRequestList() {
             statusCell.textContent = 'Intercepted';
             statusCell.className = 'status-intercepted';
             statusCell.style.color = '#ff9800';
+        } else if (req.autoModified) {
+            statusCell.textContent = req.statusLine || 'Auto-Modified';
+            statusCell.className = 'status-modified';
+            statusCell.style.color = '#9c27b0'; // Purple for auto-modified
+            statusCell.title = 'Request was automatically modified by a rule';
+            
+            // Add icon
+            const icon = document.createElement('span');
+            icon.textContent = ' ⚡';
+            statusCell.appendChild(icon);
         } else if (req.statusLine === 'Dropped') {
             statusCell.textContent = 'Dropped';
             statusCell.className = 'status-dropped';
@@ -1061,9 +1399,32 @@ function displayRequestDetails(request) {
         }
     }
     
+    // Show info note if auto-modified
+    const existingNote = document.querySelector('.auto-modified-note');
+    if (existingNote) existingNote.remove();
+    
+    if (request.autoModified) {
+        const note = document.createElement('div');
+        note.className = 'auto-modified-note';
+        note.style.padding = '10px';
+        note.style.backgroundColor = '#f3e5f5'; // Light purple
+        note.style.borderBottom = '1px solid #e1bee7';
+        note.style.color = '#7b1fa2';
+        note.style.fontSize = '12px';
+        note.innerHTML = '<strong>⚡ Info:</strong> This request was automatically modified by a Match & Replace rule.';
+        
+        // Insert after tabs
+        const tabs = document.querySelector('.tabs');
+        tabs.parentNode.insertBefore(note, tabs.nextSibling);
+    }
+    
     if (currentTab === 'request') {
         const content = formatRequestContent(request, currentRequestView);
-        requestContent.textContent = content;
+        if (currentRequestView === 'formatted' && (content.includes('<span class="syntax-') || content.includes('syntax-key'))) {
+             requestContent.innerHTML = content;
+        } else {
+             requestContent.textContent = content;
+        }
         
         // Update active button for request tab
         document.querySelectorAll('#requestTab .view-btn').forEach(btn => {
@@ -1071,7 +1432,11 @@ function displayRequestDetails(request) {
         });
     } else if (currentTab === 'modified') {
         const content = formatModifiedRequestContent(request, currentModifiedView);
-        modifiedContent.textContent = content;
+        if (currentModifiedView === 'formatted' && (content.includes('<span class="syntax-') || content.includes('syntax-key'))) {
+             modifiedContent.innerHTML = content;
+        } else {
+             modifiedContent.textContent = content;
+        }
         
         // Update active button for modified tab
         document.querySelectorAll('#modifiedTab .view-btn').forEach(btn => {
@@ -1091,7 +1456,7 @@ function displayRequestDetails(request) {
             }
         }
         
-        if (result.isImage || result.isPreview) {
+        if (result.isImage || result.isPreview || (currentResponseView === 'formatted' && (result.content.includes('<span class="syntax-') || result.content.includes('syntax-key')))) {
             responseContent.innerHTML = result.content;
         } else {
             responseContent.textContent = result.content;
@@ -1104,29 +1469,63 @@ function displayRequestDetails(request) {
     }
 }
 
+function highlightSyntax(code, language) {
+    if (!code) return '';
+    
+    if (language === 'json') {
+        return code.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+            let cls = 'syntax-number';
+            if (/^"/.test(match)) {
+                if (/:$/.test(match)) {
+                    cls = 'syntax-key';
+                } else {
+                    cls = 'syntax-string';
+                }
+            } else if (/true|false/.test(match)) {
+                cls = 'syntax-boolean';
+            } else if (/null/.test(match)) {
+                cls = 'syntax-null';
+            }
+            return '<span class="' + cls + '">' + match + '</span>';
+        });
+    } else if (language === 'xml' || language === 'html') {
+        return code.replace(/(&lt;\/?)(\w+)(.*?)(\/?&gt;)/g, function(match, start, tag, attrs, end) {
+            let formattedAttrs = attrs.replace(/(\s+)(\w+)(?:(=)("[^"]*"))?/g, '$1<span class="syntax-attr">$2</span>$3<span class="syntax-value">$4</span>');
+            return start + '<span class="syntax-tag">' + tag + '</span>' + formattedAttrs + end;
+        });
+    }
+    
+    return code;
+}
+
 function formatRequestContent(request, view) {
+    const method = request.originalMethod || request.method;
+    const url = request.originalUrl || request.url;
+    const headers = request.originalHeaders || request.requestHeaders || {};
+    const body = request.originalBody !== undefined ? request.originalBody : request.requestBody;
+
     if (view === 'raw') {
-        let raw = `${request.method} ${request.url} HTTP/1.1\n`;
+        let raw = `${method} ${url} HTTP/1.1\n`;
         
-        for (const [key, value] of Object.entries(request.requestHeaders || {})) {
+        for (const [key, value] of Object.entries(headers)) {
             raw += `${key}: ${value}\n`;
         }
         
-        if (request.requestBody) {
-            raw += `\n${request.requestBody}`;
+        if (body) {
+            raw += `\n${body}`;
         }
         
         return raw;
     } else {
         // Formatted view - show headers as-is, format body based on content type
-        let formatted = `${request.method} ${request.url} HTTP/1.1\n`;
+        let formatted = `${escapeHTML(method)} ${escapeHTML(url)} HTTP/1.1\n`;
         
-        for (const [key, value] of Object.entries(request.requestHeaders || {})) {
-            formatted += `${key}: ${value}\n`;
+        for (const [key, value] of Object.entries(headers)) {
+            formatted += `${escapeHTML(key)}: ${escapeHTML(value)}\n`;
         }
         
-        if (request.requestBody) {
-            formatted += '\n' + formatBody(request.requestBody, request.requestHeaders);
+        if (body) {
+            formatted += '\n' + formatBody(body, headers);
         }
         
         return formatted;
@@ -1154,11 +1553,11 @@ function formatModifiedRequestContent(request, view) {
         return raw;
     } else {
         // Formatted view - show headers as-is, format body based on content type
-        let formatted = `${request.modifiedMethod || request.method} ${request.modifiedUrl || request.url} HTTP/1.1\n`;
+        let formatted = `${escapeHTML(request.modifiedMethod || request.method)} ${escapeHTML(request.modifiedUrl || request.url)} HTTP/1.1\n`;
         
         const headers = request.modifiedHeaders || request.requestHeaders || {};
         for (const [key, value] of Object.entries(headers)) {
-            formatted += `${key}: ${value}\n`;
+            formatted += `${escapeHTML(key)}: ${escapeHTML(value)}\n`;
         }
         
         const body = request.modifiedBody !== undefined ? request.modifiedBody : request.requestBody;
@@ -1180,9 +1579,9 @@ function formatResponseContent(request, view) {
     
     if (isImage && request.responseBody && view === 'formatted') {
         // For images, display the image in formatted view
-        let headers = `HTTP/1.1 ${request.statusCode || 'Pending'} ${request.statusLine || ''}\n`;
+        let headers = `${escapeHTML(request.statusLine || `HTTP/1.1 ${request.statusCode || 'Pending'}`)}\n`;
         for (const [key, value] of Object.entries(request.responseHeaders || {})) {
-            headers += `${key}: ${value}\n`;
+            headers += `${escapeHTML(key)}: ${escapeHTML(value)}\n`;
         }
         
         // Construct the image source
@@ -1204,7 +1603,7 @@ function formatResponseContent(request, view) {
         }
         
         const imageHtml = `<div class="response-image-container">
-            <div class="response-headers">${headers}</div>
+            <div class="response-headers">${escapeHTML(headers)}</div>
             <img src="${imgSrc}" alt="Response Image" class="response-image" onerror="this.style.display='none'; this.parentElement.innerHTML += '<div style=\\'padding: 20px; color: #f44336;\\'>Failed to load image</div>';" />
         </div>`;
         
@@ -1213,9 +1612,9 @@ function formatResponseContent(request, view) {
     
     // Handle HTML preview in iframe
     if (isHTMLContent && request.responseBody && view === 'preview') {
-        let headers = `HTTP/1.1 ${request.statusCode || 'Pending'} ${request.statusLine || ''}\n`;
+        let headers = `${escapeHTML(request.statusLine || `HTTP/1.1 ${request.statusCode || 'Pending'}`)}\n`;
         for (const [key, value] of Object.entries(request.responseHeaders || {})) {
-            headers += `${key}: ${value}\n`;
+            headers += `${escapeHTML(key)}: ${escapeHTML(value)}\n`;
         }
         
         // Create iframe with sandboxed HTML content
@@ -1227,7 +1626,7 @@ function formatResponseContent(request, view) {
             .replace(/'/g, '&#039;');
         
         const previewHtml = `<div class="response-preview-container">
-            <div class="response-headers">${headers}</div>
+            <div class="response-headers">${escapeHTML(headers)}</div>
             <iframe class="response-preview-iframe" sandbox="allow-same-origin" srcdoc="${htmlContent}"></iframe>
         </div>`;
         
@@ -1235,7 +1634,7 @@ function formatResponseContent(request, view) {
     }
     
     if (view === 'raw') {
-        let raw = `HTTP/1.1 ${request.statusCode || 'Pending'} ${request.statusLine || ''}\n`;
+        let raw = `${request.statusLine || `HTTP/1.1 ${request.statusCode || 'Pending'}`}\n`;
         
         for (const [key, value] of Object.entries(request.responseHeaders || {})) {
             raw += `${key}: ${value}\n`;
@@ -1248,10 +1647,10 @@ function formatResponseContent(request, view) {
         return { isImage: false, isHTML: isHTMLContent, content: raw };
     } else {
         // Formatted view - show headers as-is, format body based on content type
-        let formatted = `HTTP/1.1 ${request.statusCode || 'Pending'} ${request.statusLine || ''}\n`;
+        let formatted = `${escapeHTML(request.statusLine || `HTTP/1.1 ${request.statusCode || 'Pending'}`)}\n`;
         
         for (const [key, value] of Object.entries(request.responseHeaders || {})) {
-            formatted += `${key}: ${value}\n`;
+            formatted += `${escapeHTML(key)}: ${escapeHTML(value)}\n`;
         }
         
         if (request.responseBody) {
@@ -1283,19 +1682,27 @@ function formatBody(body, headers) {
         // Format as JSON
         try {
             const parsed = JSON.parse(body);
-            return JSON.stringify(parsed, null, 2);
+            const formatted = JSON.stringify(parsed, null, 2);
+            // Escape HTML entities before highlighting to prevent injection
+            const escaped = escapeHTML(formatted);
+            return highlightSyntax(escaped, 'json');
         } catch {
-            return body;
+            return escapeHTML(body);
         }
     } else if (contentType.includes('xml') || isXML(body)) {
         // Format as XML
-        return formatXML(body);
+        const formatted = formatXML(body);
+        // Simple XML escaping for display before highlighting
+        const escaped = escapeHTML(formatted);
+        return highlightSyntax(escaped, 'xml');
     } else if (contentType.includes('html') || isHTML(body)) {
         // Format as HTML
-        return formatHTML(body);
+        const formatted = formatHTML(body);
+        const escaped = escapeHTML(formatted);
+        return highlightSyntax(escaped, 'html');
     } else {
-        // Return as-is for other content types
-        return body;
+        // Return escaped body for other content types
+        return escapeHTML(body);
     }
 }
 
@@ -1384,19 +1791,24 @@ function clearRequestDetails() {
 }
 
 function generateCurl(request) {
-    let curl = `curl -X ${request.method}`;
+    const method = request.originalMethod || request.method;
+    const url = request.originalUrl || request.url;
+    const headers = request.originalHeaders || request.requestHeaders || {};
+    const body = request.originalBody !== undefined ? request.originalBody : request.requestBody;
+
+    let curl = `curl -X ${method}`;
     
-    for (const [key, value] of Object.entries(request.requestHeaders || {})) {
+    for (const [key, value] of Object.entries(headers)) {
         if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'content-length') {
             curl += ` \\\n  -H '${key}: ${value}'`;
         }
     }
     
-    if (request.requestBody) {
-        curl += ` \\\n  -d '${request.requestBody.replace(/'/g, "\\'")}'`;
+    if (body) {
+        curl += ` \\\n  -d '${body.replace(/'/g, "\\'")}'`;
     }
     
-    curl += ` \\\n  '${request.url}'`;
+    curl += ` \\\n  '${url}'`;
     
     return curl;
 }
@@ -1776,6 +2188,11 @@ function updateInterceptSettingsUI() {
     document.getElementById('useEarlyInterception').checked = interceptSettings.useEarlyInterception;
     const earlyInterceptionWarning = document.getElementById('earlyInterceptionWarning');
     earlyInterceptionWarning.style.display = interceptSettings.useEarlyInterception ? 'block' : 'none';
+
+    // Update Scope settings
+    document.getElementById('enableScope').checked = interceptSettings.scopeEnabled || false;
+    document.getElementById('scopePatterns').value = (interceptSettings.scopePatterns || []).join('\n');
+    document.getElementById('scopeExcludePatterns').value = (interceptSettings.scopeExcludePatterns || []).join('\n');
 }
 
 function saveInterceptSettings() {
@@ -1805,6 +2222,17 @@ function saveInterceptSettings() {
         .split('\n')
         .map(p => p.trim())
         .filter(p => p.length > 0);
+
+    // Collect Scope settings
+    const scopeEnabled = document.getElementById('enableScope').checked;
+    const scopePatterns = document.getElementById('scopePatterns').value
+        .split('\n')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
+    const scopeExcludePatterns = document.getElementById('scopeExcludePatterns').value
+        .split('\n')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
         
     // Collect file extensions
     const excludeExtensions = document.getElementById('excludeExtensions').value
@@ -1820,7 +2248,7 @@ function saveInterceptSettings() {
     
     // Validate regex patterns
     const invalidPatterns = [];
-    [...includePatterns, ...excludePatterns].forEach(pattern => {
+    [...includePatterns, ...excludePatterns, ...scopePatterns, ...scopeExcludePatterns].forEach(pattern => {
         try {
             new RegExp(pattern);
         } catch (e) {
@@ -1841,7 +2269,10 @@ function saveInterceptSettings() {
         excludePatterns: excludePatterns,
         excludeExtensions: excludeExtensions,
         interceptResponses: interceptResponses,
-        useEarlyInterception: useEarlyInterception
+        useEarlyInterception: useEarlyInterception,
+        scopeEnabled: scopeEnabled,
+        scopePatterns: scopePatterns,
+        scopeExcludePatterns: scopeExcludePatterns
     };
     
     port.postMessage({
@@ -1858,10 +2289,13 @@ function resetInterceptSettings() {
         includeGET: false,
         urlPatterns: [],
         excludePatterns: [],
-        excludeExtensions: ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot'],
-        interceptResponses: false,
-        useEarlyInterception: false
-    };
+    excludeExtensions: ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot'],
+    interceptResponses: false,
+    useEarlyInterception: false,
+    scopeEnabled: false,
+    scopePatterns: [],
+    scopeExcludePatterns: []
+};
     
     port.postMessage({
         type: 'updateInterceptSettings',
@@ -2022,10 +2456,53 @@ function performDecoding() {
             case 'html':
                 output = unescapeHTML(input);
                 break;
+            case 'jwt':
+                output = decodeJWT(input);
+                break;
         }
         decoderOutput.value = output;
     } catch (e) {
         decoderOutput.value = `Error decoding: ${e.message}`;
+    }
+}
+
+function decodeJWT(token) {
+    try {
+        const parts = token.split('.');
+        if (parts.length !== 3) {
+            throw new Error('Invalid JWT format. Expected 3 parts separated by dots.');
+        }
+
+        const header = JSON.parse(atob(parts[0].replace(/-/g, '+').replace(/_/g, '/')));
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+        
+        let output = '=== Header ===\n';
+        output += JSON.stringify(header, null, 2);
+        output += '\n\n=== Payload ===\n';
+        output += JSON.stringify(payload, null, 2);
+        
+        if (payload.exp) {
+            const expDate = new Date(payload.exp * 1000);
+            output += `\n\nExpires: ${expDate.toLocaleString()}`;
+            const now = new Date();
+            if (now > expDate) {
+                output += ' (Expired)';
+            } else {
+                output += ' (Valid)';
+            }
+        }
+        
+        if (payload.iat) {
+            const iatDate = new Date(payload.iat * 1000);
+            output += `\nIssued At: ${iatDate.toLocaleString()}`;
+        }
+        
+        output += '\n\n=== Signature ===\n';
+        output += parts[2];
+        
+        return output;
+    } catch (e) {
+        throw new Error('Failed to decode JWT: ' + e.message);
     }
 }
 

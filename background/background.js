@@ -7,8 +7,12 @@ let interceptSettings = {
   excludePatterns: [],
   excludeExtensions: ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot'],
   interceptResponses: false,
-  useEarlyInterception: false
+  useEarlyInterception: false,
+  scopeEnabled: false,
+  scopePatterns: [],
+  scopeExcludePatterns: []
 };
+let matchReplaceRules = [];
 let requests = new Map();
 let activeTabId = null;
 let devtoolsPorts = new Map();
@@ -21,17 +25,21 @@ let interceptedRequestIds = new Set();
 let pendingUrlModifications = new Map();
 let pendingHeaderModifications = new Map();
 let pendingResponseHeaderIntercepts = new Map();
+let pendingBodyModifications = new Map();
 
 const MAX_REQUESTS = 100;
 
 // Load saved settings from storage on startup
-browser.storage.local.get(['interceptSettings', 'captureEnabled']).then((result) => {
+browser.storage.local.get(['interceptSettings', 'captureEnabled', 'matchReplaceRules']).then((result) => {
   if (result.interceptSettings) {
     interceptSettings = { ...interceptSettings, ...result.interceptSettings };
   }
   if (result.captureEnabled !== undefined) {
     captureEnabled = result.captureEnabled;
     updateIcon();
+  }
+  if (result.matchReplaceRules) {
+    matchReplaceRules = result.matchReplaceRules;
   }
 }).catch((err) => {
   console.error('Failed to load settings from storage:', err);
@@ -211,10 +219,48 @@ browser.webRequest.onBeforeRequest.addListener(
     if (!captureEnabled || details.tabId === -1 || (!isInspectedTab && !isActiveTab)) {
       return {};
     }
+
+    // Scope check
+    if (interceptSettings.scopeEnabled) {
+      // 1. Check Include Patterns (Whitelist)
+      if (interceptSettings.scopePatterns.length > 0) {
+        const isInScope = interceptSettings.scopePatterns.some(pattern => {
+          try {
+            const regex = new RegExp(pattern, 'i');
+            return regex.test(details.url);
+          } catch (e) {
+            console.warn('Invalid regex pattern:', pattern);
+            return false;
+          }
+        });
+        
+        if (!isInScope) {
+          return {};
+        }
+      }
+
+      // 2. Check Exclude Patterns (Blacklist)
+      if (interceptSettings.scopeExcludePatterns && interceptSettings.scopeExcludePatterns.length > 0) {
+        const isExcluded = interceptSettings.scopeExcludePatterns.some(pattern => {
+          try {
+            const regex = new RegExp(pattern, 'i');
+            return regex.test(details.url);
+          } catch (e) {
+            console.warn('Invalid regex pattern:', pattern);
+            return false;
+          }
+        });
+        
+        if (isExcluded) {
+          return {};
+        }
+      }
+    }
     
     const requestId = `${details.requestId}_${requestIdCounter++}`;
     requestIdMap.set(details.requestId, requestId);
     
+    // Create request data object early to track modification
     const requestData = {
       id: requestId,
       originalRequestId: details.requestId,
@@ -233,8 +279,79 @@ browser.webRequest.onBeforeRequest.addListener(
       tabId: details.tabId,
       completed: false,
       intercepted: false,
-      shouldIntercept: false
+      shouldIntercept: false,
+      wasModified: false,
+      autoModified: false
     };
+
+    // Apply match & replace rules for onBeforeRequest (URL and Body)
+    let modifiedDetails = { ...details };
+    let wasModified = false;
+    let bodyModified = false;
+    let urlModified = false;
+    let modifiedBody = requestData.requestBody;
+    
+    if (matchReplaceRules.length > 0) {
+        for (const rule of matchReplaceRules) {
+            if (!rule.enabled) continue;
+            
+            if (rule.target === 'url') {
+                const newUrl = applyRuleReplacement(modifiedDetails.url, rule);
+                if (newUrl !== modifiedDetails.url) {
+                    modifiedDetails.url = newUrl;
+                    wasModified = true;
+                    urlModified = true;
+                }
+            } else if (rule.target === 'body') {
+                const newBody = applyRuleReplacement(modifiedBody, rule);
+                if (newBody !== modifiedBody) {
+                    modifiedBody = newBody;
+                    wasModified = true;
+                    bodyModified = true;
+                }
+            }
+        }
+    }
+
+    if (wasModified) {
+        requestData.wasModified = true;
+        requestData.autoModified = true;
+        
+        // Priority 1: URL Redirection
+        if (urlModified) {
+            requestData.originalUrl = details.url;
+            requestData.modifiedUrl = modifiedDetails.url;
+            requestData.statusLine = 'Auto-Redirected (Rule)';
+            requestData.statusCode = 307; // Internal redirect code
+            requestData.completed = true;
+            
+            requests.set(requestId, requestData);
+            
+            notifyDevTools({
+                type: 'newRequest',
+                request: requestData
+            });
+
+            return { redirectUrl: modifiedDetails.url };
+        }
+        
+        // Priority 2: Body Modification (Wait for headers)
+        if (bodyModified) {
+            // Store for onBeforeSendHeaders where we can get headers and cancel/resend
+            pendingBodyModifications.set(details.requestId, {
+                modifiedBody: modifiedBody,
+                requestData: requestData
+            });
+            
+            // We don't cancel here anymore. We wait for headers.
+            // We still update the requestData for the UI to know it's being processed
+            requestData.statusLine = 'Pending Body Mod...';
+            requests.set(requestId, requestData);
+            notifyDevTools({ type: 'newRequest', request: requestData });
+            
+            return {};
+        }
+    }
     
     if (interceptEnabled && shouldInterceptRequest(details)) {
       requestData.shouldIntercept = true;
@@ -306,6 +423,34 @@ browser.webRequest.onBeforeRequest.addListener(
   ["blocking", "requestBody"]
 );
 
+function applyHeaderRules(originalHeaders) {
+    if (!matchReplaceRules.length) return { headers: originalHeaders, modified: false };
+
+    let headersModified = false;
+    let newHeaders = originalHeaders.map(header => {
+        let headerModified = false;
+        let newValue = header.value;
+        
+        for (const rule of matchReplaceRules) {
+            if (!rule.enabled || rule.target !== 'headers') continue;
+            
+            const replaced = applyRuleReplacement(newValue, rule);
+            if (replaced !== newValue) {
+                newValue = replaced;
+                headerModified = true;
+            }
+        }
+        
+        if (headerModified) {
+            headersModified = true;
+            return { name: header.name, value: newValue };
+        }
+        return header;
+    });
+    
+    return { headers: newHeaders, modified: headersModified };
+}
+
 browser.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
@@ -315,7 +460,90 @@ browser.webRequest.onBeforeSendHeaders.addListener(
     if (!requestId) return {};
     
     const request = requests.get(requestId);
+    
+    // Check for Pending Body Modification
+    if (pendingBodyModifications.has(details.requestId)) {
+        const pendingBodyMod = pendingBodyModifications.get(details.requestId);
+        pendingBodyModifications.delete(details.requestId);
+        
+        if (request) {
+            request.originalBody = request.requestBody;
+            request.modifiedBody = pendingBodyMod.modifiedBody;
+            request.statusLine = 'Auto-Modified (Body)';
+            
+            // Apply header rules
+            const { headers: newHeaders, modified: headersModified } = applyHeaderRules(details.requestHeaders);
+            
+            if (headersModified) {
+                request.statusLine = 'Auto-Modified (Body & Headers)';
+            }
+
+            // Store original and modified headers
+            request.originalHeaders = details.requestHeaders.reduce((acc, h) => ({ ...acc, [h.name]: h.value }), {});
+            
+            const newHeadersObj = newHeaders.reduce((acc, h) => {
+                acc[h.name] = h.value;
+                return acc;
+            }, {});
+            
+            // Update request object with headers so they appear in UI
+            request.requestHeaders = newHeadersObj;
+            request.modifiedHeaders = newHeadersObj;
+
+            // Prepare headers for fetch (filtering unsafe)
+            const headers = {};
+            const unsafeHeaders = ['host', 'content-length', 'connection', 'origin', 'referer', 'accept-encoding', 'cookie', 'user-agent'];
+            
+            newHeaders.forEach(h => {
+                if (!unsafeHeaders.includes(h.name.toLowerCase())) {
+                    headers[h.name] = h.value;
+                }
+            });
+            
+            // Resend
+            resendModifiedRequest(request, {
+                url: details.url,
+                method: details.method,
+                headers: headers,
+                body: pendingBodyMod.modifiedBody
+            });
+            
+            return { cancel: true };
+        }
+    }
+    
+    // Apply Match & Replace for Headers
+    const { headers: newHeaders, modified: headersModified } = applyHeaderRules(details.requestHeaders);
+    
+    if (headersModified) {
+        if (request) {
+            request.wasModified = true;
+            request.autoModified = true;
+            request.originalHeaders = details.requestHeaders.reduce((acc, h) => ({ ...acc, [h.name]: h.value }), {});
+            request.statusLine = (request.statusLine && request.statusLine !== 'Pending' ? request.statusLine : 'Auto-Modified') + ' (Headers)';
+            
+            request.requestHeaders = newHeaders.reduce((acc, header) => {
+                acc[header.name] = header.value;
+                if (header.name.toLowerCase() === 'content-length') {
+                    request.requestSize = parseInt(header.value, 10) || 0;
+                }
+                return acc;
+            }, {});
+        }
+        
+        // Send update immediately to reflect auto-modification
+        if (request) {
+                notifyDevTools({
+                type: 'updateRequest',
+                request: request
+                });
+        }
+
+        return { requestHeaders: newHeaders };
+    }
+
     if (request) {
+      // Standard logic - update headers from details (original)
       request.requestHeaders = details.requestHeaders.reduce((acc, header) => {
         acc[header.name] = header.value;
         if (header.name.toLowerCase() === 'content-length') {
@@ -700,6 +928,13 @@ function handleDevToolsMessage(msg, port) {
       });
       notifyDevTools({ type: 'interceptSettingsChanged', settings: interceptSettings });
       break;
+
+    case 'updateMatchReplaceRules':
+      matchReplaceRules = msg.rules;
+      browser.storage.local.set({ matchReplaceRules: matchReplaceRules }).catch((err) => {
+        console.error('Failed to save match replace rules:', err);
+      });
+      break;
       
     case 'getInterceptSettings':
       port.postMessage({ type: 'interceptSettingsResponse', settings: interceptSettings });
@@ -717,6 +952,83 @@ function handleDevToolsMessage(msg, port) {
       handleDisableIntercept(msg.currentRequestId, msg.currentType);
       break;
   }
+}
+
+async function resendModifiedRequest(request, modifiedRequest) {
+    request.intercepted = false;
+    request.statusLine = 'Resending (Modified)';
+    
+    notifyDevTools({
+      type: 'updateRequest',
+      request: request
+    });
+    
+    try {
+      const fetchOptions = {
+        method: modifiedRequest.method,
+        headers: modifiedRequest.headers
+      };
+      
+      if (['POST', 'PUT', 'PATCH'].includes(modifiedRequest.method) && modifiedRequest.body) {
+        fetchOptions.body = modifiedRequest.body;
+      }
+      
+      const startTime = Date.now();
+      const response = await fetch(modifiedRequest.url, fetchOptions);
+      const duration = Date.now() - startTime;
+      
+      const responseHeaders = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+      
+      const contentType = response.headers.get('content-type') || '';
+      let responseBody = '';
+      
+      // Determine status line - use HTTP/1.1 as fallback if protocol not available
+      // fetch response doesn't typically expose protocol version
+      const statusText = response.statusText || 'OK';
+      const statusLine = `HTTP/1.1 ${response.status} ${statusText}`;
+      
+      if (contentType.includes('image/')) {
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let binary = '';
+        for (let i = 0; i < uint8Array.byteLength; i++) {
+          binary += String.fromCharCode(uint8Array[i]);
+        }
+        responseBody = btoa(binary);
+        request.isBase64 = true;
+      } else {
+        responseBody = await response.text();
+        responseBody = responseBody.substring(0, 50000);
+        request.isBase64 = false;
+      }
+      
+      request.statusCode = response.status;
+      request.statusLine = statusLine;
+      request.responseHeaders = responseHeaders;
+      request.responseBody = responseBody;
+      request.completed = true;
+      request.autoModified = true; // Ensure it's marked
+      request.wasModified = true;
+      
+      notifyDevTools({
+        type: 'updateRequest',
+        request: request
+      });
+      
+    } catch (error) {
+      request.statusCode = 0;
+      request.statusLine = `Modification Failed: ${error.message}`;
+      request.completed = true;
+      
+      notifyDevTools({
+        type: 'updateRequest',
+        request: request
+      });
+    }
 }
 
 async function handleForwardRequest(requestId, modifiedRequest) {
@@ -796,73 +1108,7 @@ async function handleForwardRequest(requestId, modifiedRequest) {
         pending.resolve({ cancel: true });
         pendingRequests.delete(originalRequestId);
         
-        request.intercepted = false;
-        request.statusLine = 'Resending (Modified)';
-        
-        notifyDevTools({
-          type: 'updateRequest',
-          request: request
-        });
-        
-        try {
-          const fetchOptions = {
-            method: modifiedRequest.method,
-            headers: modifiedRequest.headers
-          };
-          
-          if (['POST', 'PUT', 'PATCH'].includes(modifiedRequest.method) && modifiedRequest.body) {
-            fetchOptions.body = modifiedRequest.body;
-          }
-          
-          const startTime = Date.now();
-          const response = await fetch(modifiedRequest.url, fetchOptions);
-          const duration = Date.now() - startTime;
-          
-          const responseHeaders = {};
-          response.headers.forEach((value, key) => {
-            responseHeaders[key] = value;
-          });
-          
-          const contentType = response.headers.get('content-type') || '';
-          let responseBody = '';
-          
-          if (contentType.includes('image/')) {
-            const blob = await response.blob();
-            const arrayBuffer = await blob.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-            let binary = '';
-            for (let i = 0; i < uint8Array.byteLength; i++) {
-              binary += String.fromCharCode(uint8Array[i]);
-            }
-            responseBody = btoa(binary);
-            request.isBase64 = true;
-          } else {
-            responseBody = await response.text();
-            responseBody = responseBody.substring(0, 50000);
-            request.isBase64 = false;
-          }
-          
-          request.statusCode = response.status;
-          request.statusLine = `Modified & Resent (${duration}ms)`;
-          request.responseHeaders = responseHeaders;
-          request.responseBody = responseBody;
-          request.completed = true;
-          
-          notifyDevTools({
-            type: 'updateRequest',
-            request: request
-          });
-          
-        } catch (error) {
-          request.statusCode = 0;
-          request.statusLine = `Modification Failed: ${error.message}`;
-          request.completed = true;
-          
-          notifyDevTools({
-            type: 'updateRequest',
-            request: request
-          });
-        }
+        resendModifiedRequest(request, modifiedRequest);
         return;
       }
       
@@ -1109,6 +1355,50 @@ function notifyDevTools(message) {
       console.error('Failed to send message to devtools:', e);
     }
   });
+}
+
+function applyRuleReplacement(source, rule) {
+    try {
+        const type = rule.matchType || 'regex'; // Default to regex for backward compatibility
+        const pattern = rule.matchPattern;
+        const replacement = rule.replaceValue;
+        
+        if (!pattern) return source;
+
+        switch (type) {
+            case 'regex':
+                const regex = new RegExp(pattern, 'g');
+                return source.replace(regex, replacement);
+                
+            case 'contains':
+                // Global string replacement
+                return source.split(pattern).join(replacement);
+                
+            case 'starts_with':
+                if (source.startsWith(pattern)) {
+                    return replacement + source.substring(pattern.length);
+                }
+                return source;
+            
+            case 'ends_with':
+                if (source.endsWith(pattern)) {
+                    return source.substring(0, source.length - pattern.length) + replacement;
+                }
+                return source;
+                
+            case 'exact':
+                if (source === pattern) {
+                    return replacement;
+                }
+                return source;
+                
+            default:
+                return source;
+        }
+    } catch (e) {
+        console.error('Error applying rule replacement:', e);
+        return source;
+    }
 }
 
 async function handleRepeaterRequest(requestData, port) {
