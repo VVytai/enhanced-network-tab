@@ -639,6 +639,10 @@ function handleDevToolsMessage(msg, port) {
         interceptEnabled = false;
         notifyDevTools({ type: 'interceptStateChanged', enabled: false });
       }
+      // Save capture state to storage
+      browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
+        console.error('Failed to save capture state:', err);
+      });
       updateIcon();
       notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
       break;
