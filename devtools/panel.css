@@ -1260,6 +1260,24 @@ body.dark-mode .add-rule-form input[type="text"] {
     margin-left: 10px;
     vertical-align: middle;
 }
+@media (max-width: 1200px) {
+    .main-content {
+        flex-direction: column;
+    }
+
+    .request-list-container {
+        width: 100%;
+        flex: 1; /* Share height equally or adjust as needed */
+        border-right: none;
+        border-bottom: 1px solid var(--border-primary);
+        min-height: 200px; /* Ensure list is usable */
+    }
+
+    .request-details {
+        width: 100%;
+        flex: 1;
+        min-height: 300px; /* Ensure details are usable */
+    }
 
     .view-toggle {
         overflow-x: auto;
