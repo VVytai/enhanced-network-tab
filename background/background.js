@@ -27,6 +27,10 @@ let pendingHeaderModifications = new Map();
 let pendingResponseHeaderIntercepts = new Map();
 let pendingBodyModifications = new Map();
 
+// Repeater request tracking - for handling forbidden headers (Cookie, Host, Origin, etc.)
+let pendingRepeaterRequests = new Map(); // repeaterId -> { headers, url, method, body }
+let repeaterIdCounter = 0;
+
 const MAX_REQUESTS = 100;
 
 // Load saved settings from storage on startup
@@ -453,6 +457,28 @@ function applyHeaderRules(originalHeaders) {
 
 browser.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
+    // Check if this is a Repeater request (from background script, identified by marker header)
+    const repeaterIdHeader = details.requestHeaders.find(h => h.name.toLowerCase() === 'x-repeater-id');
+    if (repeaterIdHeader) {
+      const repeaterId = repeaterIdHeader.value;
+      const pendingRepeater = pendingRepeaterRequests.get(repeaterId);
+      
+      if (pendingRepeater) {
+        // Build new headers array from user's desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
+        const newHeaders = [];
+        
+        for (const [name, value] of Object.entries(pendingRepeater.headers)) {
+          // Skip the marker header - we don't want to send it to the server
+          if (name.toLowerCase() !== 'x-repeater-id') {
+            newHeaders.push({ name, value });
+          }
+        }
+        
+        // Return modified headers - this allows us to set ANY header including forbidden ones
+        return { requestHeaders: newHeaders };
+      }
+    }
+    
     const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
     if (!captureEnabled || !isTrackedTab) return {};
     
@@ -963,10 +989,25 @@ async function resendModifiedRequest(request, modifiedRequest) {
       request: request
     });
     
+    // Generate unique repeater ID for tracking this request (reusing repeater system)
+    const repeaterId = `resend_${++repeaterIdCounter}_${Date.now()}`;
+    
     try {
+      // Store all desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
+      // These will be applied in onBeforeSendHeaders where we can set any header
+      pendingRepeaterRequests.set(repeaterId, {
+        headers: modifiedRequest.headers,
+        url: modifiedRequest.url,
+        method: modifiedRequest.method,
+        body: modifiedRequest.body
+      });
+      
+      // Only use marker header for fetch - all other headers will be set in onBeforeSendHeaders
       const fetchOptions = {
         method: modifiedRequest.method,
-        headers: modifiedRequest.headers
+        headers: {
+          'X-Repeater-ID': repeaterId
+        }
       };
       
       if (['POST', 'PUT', 'PATCH'].includes(modifiedRequest.method) && modifiedRequest.body) {
@@ -976,6 +1017,9 @@ async function resendModifiedRequest(request, modifiedRequest) {
       const startTime = Date.now();
       const response = await fetch(modifiedRequest.url, fetchOptions);
       const duration = Date.now() - startTime;
+      
+      // Cleanup after successful request
+      pendingRepeaterRequests.delete(repeaterId);
       
       const responseHeaders = {};
       response.headers.forEach((value, key) => {
@@ -1020,6 +1064,9 @@ async function resendModifiedRequest(request, modifiedRequest) {
       });
       
     } catch (error) {
+      // Cleanup on error as well
+      pendingRepeaterRequests.delete(repeaterId);
+      
       request.statusCode = 0;
       request.statusLine = `Modification Failed: ${error.message}`;
       request.completed = true;
@@ -1402,10 +1449,25 @@ function applyRuleReplacement(source, rule) {
 }
 
 async function handleRepeaterRequest(requestData, port) {
+  // Generate unique repeater ID for tracking this request (outside try block for cleanup access)
+  const repeaterId = `repeater_${++repeaterIdCounter}_${Date.now()}`;
+  
   try {
+    // Store all user's desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
+    // These will be applied in onBeforeSendHeaders where we can set any header
+    pendingRepeaterRequests.set(repeaterId, {
+      headers: requestData.headers,
+      url: requestData.url,
+      method: requestData.method,
+      body: requestData.body
+    });
+    
+    // Only use marker header for fetch - all other headers will be set in onBeforeSendHeaders
     const options = {
       method: requestData.method,
-      headers: requestData.headers
+      headers: {
+        'X-Repeater-ID': repeaterId
+      }
     };
     
     if (['POST', 'PUT', 'PATCH'].includes(requestData.method) && requestData.body) {
@@ -1415,6 +1477,9 @@ async function handleRepeaterRequest(requestData, port) {
     const startTime = Date.now();
     const response = await fetch(requestData.url, options);
     const duration = Date.now() - startTime;
+    
+    // Cleanup after successful request
+    pendingRepeaterRequests.delete(repeaterId);
     
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
@@ -1434,6 +1499,9 @@ async function handleRepeaterRequest(requestData, port) {
       }
     });
   } catch (error) {
+    // Cleanup on error as well
+    pendingRepeaterRequests.delete(repeaterId);
+    
     port.postMessage({
       type: 'repeaterError',
       error: error.message
