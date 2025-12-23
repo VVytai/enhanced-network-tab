@@ -30,21 +30,18 @@ The built-in security scanner automatically analyzes response bodies while you b
 | Service | Detected Token Types |
 |---------|---------------------|
 | **AWS** | Access Key ID, Secret Key |
-| **Google Cloud** | API Key, OAuth Access Token, Refresh Token, Auth Code |
+| **Google Cloud** | API Key, OAuth Access Token |
 | **GitHub** | Classic PAT, Fine-Grained PAT, OAuth, User-to-Server, Server-to-Server, Refresh Token |
 | **OpenAI** | User API Key, Project Key, Service Key (with T3BlbkFJ marker) |
 | **Stripe** | Live/Test Secret Key, Restricted Key, Publishable Key |
 | **Slack** | Bot Token, User Token, Config Token, Refresh Token, Webhook |
-| **Twitter** | Access Token |
 | **Facebook** | Access Token, OAuth 2.0 |
-| **Instagram** | OAuth 2.0 Token |
 | **Square** | Access Token, OAuth Secret |
 | **PayPal/Braintree** | Access Token |
-| **Twilio** | API Key, Access Token |
+| **Twilio** | API Key |
 | **SendGrid** | API Key |
 | **Mailgun** | API Key |
 | **MailChimp** | Access Token |
-| **Heroku** | API Key |
 | **WakaTime** | API Key |
 | **Amazon MWS** | Auth Token |
 | **Foursquare** | Secret Key |

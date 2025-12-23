@@ -49,7 +49,6 @@ const SecurityScanner = {
         // Google
         { pattern: /AIza[0-9A-Za-z\-_]{35}/g, type: 'Google API Key', severity: 'critical', strict: true },
         { pattern: /ya29\.[0-9A-Za-z\-_]+/g, type: 'Google OAuth Access Token', severity: 'critical', strict: true },
-        { pattern: /1\/[0-9A-Za-z\-]{43}/g, type: 'Google OAuth Refresh Token', severity: 'critical', strict: true },
         
         // GitHub
         { pattern: /ghp_[a-zA-Z0-9]{36}/g, type: 'GitHub Personal Access Token', severity: 'critical', strict: true },
@@ -77,14 +76,8 @@ const SecurityScanner = {
         { pattern: /xoxe-1-[0-9a-zA-Z]{147}/g, type: 'Slack Refresh Token', severity: 'critical', strict: true },
         { pattern: /T[a-zA-Z0-9_]{8}\/B[a-zA-Z0-9_]{8}\/[a-zA-Z0-9_]{24}/g, type: 'Slack Webhook', severity: 'high', strict: true },
         
-        // Twitter
-        { pattern: /[1-9][0-9]+-[0-9a-zA-Z]{40}/g, type: 'Twitter Access Token', severity: 'critical', strict: true },
-        
         // Facebook
         { pattern: /EAACEdEose0cBA[0-9A-Za-z]+/g, type: 'Facebook Access Token', severity: 'critical', strict: true },
-        
-        // Instagram
-        { pattern: /[0-9a-fA-F]{7}\.[0-9a-fA-F]{32}/g, type: 'Instagram OAuth Token', severity: 'critical', strict: true },
         
         // Square
         { pattern: /sqOatp-[0-9A-Za-z\-_]{22}/g, type: 'Square Access Token', severity: 'critical', strict: true },
@@ -92,7 +85,6 @@ const SecurityScanner = {
         
         // Twilio
         { pattern: /SK[0-9a-fA-F]{32}/g, type: 'Twilio API Key', severity: 'critical', strict: true },
-        { pattern: /55[0-9a-fA-F]{32}/g, type: 'Twilio Access Token', severity: 'critical', strict: true },
         
         // SendGrid
         { pattern: /SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/g, type: 'SendGrid API Key', severity: 'critical', strict: true },
@@ -102,9 +94,6 @@ const SecurityScanner = {
         
         // MailChimp
         { pattern: /[0-9a-f]{32}-us[0-9]{1,2}/g, type: 'MailChimp Access Token', severity: 'critical', strict: true },
-        
-        // Heroku
-        { pattern: /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g, type: 'Heroku/UUID API Key', severity: 'medium', strict: false },
         
         // WakaTime
         { pattern: /waka_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, type: 'WakaTime API Key', severity: 'critical', strict: true },

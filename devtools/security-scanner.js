@@ -17,9 +17,6 @@ const SecurityScanner = {
         { pattern: /AIza[0-9A-Za-z\-_]{35}/g, type: 'Google API Key', severity: 'critical', strict: true },
         // Google OAuth 2.0 Access Token
         { pattern: /ya29\.[0-9A-Za-z\-_]+/g, type: 'Google OAuth Access Token', severity: 'critical', strict: true },
-        // Google OAuth 2.0 Refresh Token
-        { pattern: /1\/[0-9A-Za-z\-]{43}/g, type: 'Google OAuth Refresh Token (43)', severity: 'critical', strict: true },
-        { pattern: /1\/[0-9A-Za-z\-]{64}/g, type: 'Google OAuth Refresh Token (64)', severity: 'critical', strict: true },
         // GCP OAuth 2.0
         { pattern: /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g, type: 'GCP OAuth 2.0', severity: 'medium', strict: false },
         // GCP API Key Format
@@ -68,20 +65,9 @@ const SecurityScanner = {
         { pattern: /xox[baprs]-[0-9a-zA-Z\-]{10,48}/g, type: 'Slack Token (Legacy)', severity: 'critical', strict: true },
         
         // ==========================================
-        // TWITTER
-        // ==========================================
-        { pattern: /[1-9][0-9]+-[0-9a-zA-Z]{40}/g, type: 'Twitter Access Token', severity: 'critical', strict: true },
-        { pattern: /["']?(?:twitter[_-]?(?:api[_-]?key|api[_-]?secret|bearer[_-]?token|access[_-]?token))["']?\s*[:=]\s*["']([a-zA-Z0-9_-]{20,})["']/gi, type: 'Twitter Credential', severity: 'critical', strict: false },
-        
-        // ==========================================
         // FACEBOOK
         // ==========================================
         { pattern: /EAACEdEose0cBA[0-9A-Za-z]+/g, type: 'Facebook Access Token', severity: 'critical', strict: true },
-        
-        // ==========================================
-        // INSTAGRAM
-        // ==========================================
-        { pattern: /[0-9a-fA-F]{7}\.[0-9a-fA-F]{32}/g, type: 'Instagram OAuth 2.0 Token', severity: 'critical', strict: true },
         
         // ==========================================
         // SQUARE
@@ -98,7 +84,6 @@ const SecurityScanner = {
         // TWILIO
         // ==========================================
         { pattern: /SK[0-9a-fA-F]{32}/g, type: 'Twilio API Key', severity: 'critical', strict: true },
-        { pattern: /55[0-9a-fA-F]{32}/g, type: 'Twilio Access Token', severity: 'critical', strict: true },
         
         // ==========================================
         // MAILGUN
@@ -109,11 +94,6 @@ const SecurityScanner = {
         // MAILCHIMP
         // ==========================================
         { pattern: /[0-9a-f]{32}-us[0-9]{1,2}/g, type: 'MailChimp Access Token', severity: 'critical', strict: true },
-        
-        // ==========================================
-        // HEROKU
-        // ==========================================
-        { pattern: /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g, type: 'Heroku API Key', severity: 'high', strict: false },
         
         // ==========================================
         // PICATIC
