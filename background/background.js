@@ -1109,8 +1109,10 @@ browser.webRequest.onBeforeSendHeaders.addListener(
 
             // Prepare headers for fetch (filtering unsafe)
             const headers = {};
-            const unsafeHeaders = ['host', 'content-length', 'connection', 'origin', 'referer', 'accept-encoding', 'cookie', 'user-agent'];
-            
+            // Cookie is kept: it's re-applied via onBeforeSendHeaders (marker path), which
+            // can set forbidden headers, so the resent request replays the page's session.
+            const unsafeHeaders = ['host', 'content-length', 'connection', 'origin', 'referer', 'accept-encoding', 'user-agent'];
+
             newHeaders.forEach(h => {
                 if (!unsafeHeaders.includes(h.name.toLowerCase())) {
                     headers[h.name] = h.value;
@@ -1329,14 +1331,21 @@ browser.webRequest.onHeadersReceived.addListener(
          });
 
       } else {
+        const responseBodyRules = isTextContent
+          ? matchReplaceRules.filter(r => r.enabled && r.target === 'response_body')
+          : [];
+        const applyResponseBodyRules = responseBodyRules.length > 0;
+
         filter.ondata = event => {
           responseData.push(event.data);
-          filter.write(event.data);
+          // When response-body rules apply we buffer the whole body and write the
+          // modified version in onstop; otherwise stream chunks straight through.
+          if (!applyResponseBodyRules) {
+            filter.write(event.data);
+          }
         };
-        
+
         filter.onstop = event => {
-          filter.close();
-          
           try {
             const combinedData = new Uint8Array(
               responseData.reduce((acc, chunk) => acc + chunk.byteLength, 0)
@@ -1357,10 +1366,30 @@ browser.webRequest.onHeadersReceived.addListener(
               request.responseBody = base64;
               request.isBase64 = true;
             } else {
-              const text = decoder.decode(combinedData);
+              let text = decoder.decode(combinedData);
+
+              // Apply Match & Replace rules targeting the Response Body
+              let responseModified = false;
+              for (const rule of responseBodyRules) {
+                const replaced = applyRuleReplacement(text, rule);
+                if (replaced !== text) {
+                  text = replaced;
+                  responseModified = true;
+                }
+              }
+              if (applyResponseBodyRules) {
+                filter.write(new TextEncoder().encode(text));
+              }
+              if (responseModified) {
+                request.wasModified = true;
+                request.autoModified = true;
+                request.responseModified = true;
+                request.statusLine = 'Response Modified (Rule)';
+              }
+
               request.responseBody = text.substring(0, 50000);
               request.isBase64 = false;
-              
+
               // Background security scanning - runs even when DevTools is closed
               if (captureEnabled && SecurityScanner.isScannable(contentType)) {
                 const scanResults = SecurityScanner.scan(text, details.url);
@@ -1425,13 +1454,16 @@ browser.webRequest.onHeadersReceived.addListener(
                 }
               }
             }
-            
+
+            filter.close();
+
             notifyDevTools({
               type: 'updateRequest',
               request: request
             });
           } catch (e) {
             console.error('Failed to decode response:', e);
+            try { filter.close(); } catch (_) {}
           }
         };
       }

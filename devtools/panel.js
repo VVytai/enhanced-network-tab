@@ -673,7 +673,7 @@ function renderMatchReplaceRules() {
         
         const title = document.createElement('span');
         const typeLabel = rule.matchType ? `[${rule.matchType}] ` : '[regex] ';
-        title.innerHTML = `<strong>${rule.target.toUpperCase()}</strong>: <small>${typeLabel}</small><code>${escapeHTML(rule.matchPattern)}</code> → <code>${escapeHTML(rule.replaceValue)}</code>`;
+        title.innerHTML = `<strong>${rule.target.replace(/_/g, ' ').toUpperCase()}</strong>: <small>${typeLabel}</small><code>${escapeHTML(rule.matchPattern)}</code> → <code>${escapeHTML(rule.replaceValue)}</code>`;
         
         const controls = document.createElement('div');
         
