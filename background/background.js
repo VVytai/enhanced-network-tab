@@ -33,6 +33,24 @@ let repeaterIdCounter = 0;
 
 const MAX_REQUESTS = 1000;
 
+function safeUint8ArrayToBase64(uint8Array) {
+  if (!uint8Array) return '';
+  try {
+    let binary = '';
+    const chunkSize = 8192;
+    const bytes = uint8Array instanceof Uint8Array ? uint8Array : new Uint8Array(uint8Array);
+    const len = bytes.length;
+    for (let i = 0; i < len; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+  } catch (e) {
+    console.error('Failed to encode Uint8Array to Base64:', e);
+    return '';
+  }
+}
+
 // ==========================================
 // SECURITY SCANNER - Background Implementation
 // ==========================================
@@ -1256,12 +1274,7 @@ browser.webRequest.onHeadersReceived.addListener(
             
             let bodyContent;
             if (isImageContent) {
-              let binary = '';
-              const len = combinedData.byteLength;
-              for (let i = 0; i < len; i++) {
-                binary += String.fromCharCode(combinedData[i]);
-              }
-              bodyContent = btoa(binary);
+              bodyContent = safeUint8ArrayToBase64(combinedData);
               request.responseBody = bodyContent;
               request.isBase64 = true;
             } else {
@@ -1357,12 +1370,7 @@ browser.webRequest.onHeadersReceived.addListener(
             }
             
             if (isImageContent) {
-              let binary = '';
-              const len = combinedData.byteLength;
-              for (let i = 0; i < len; i++) {
-                binary += String.fromCharCode(combinedData[i]);
-              }
-              const base64 = btoa(binary);
+              const base64 = safeUint8ArrayToBase64(combinedData);
               request.responseBody = base64;
               request.isBase64 = true;
             } else {
@@ -1390,11 +1398,33 @@ browser.webRequest.onHeadersReceived.addListener(
               request.responseBody = text.substring(0, 50000);
               request.isBase64 = false;
 
+              // Helper to extract referer header or document URL
+              const getRequestReferer = (req, det) => {
+                let ref = '';
+                if (req && req.requestHeaders) {
+                  const found = Object.entries(req.requestHeaders).find(([k]) => k.toLowerCase() === 'referer');
+                  if (found) ref = found[1];
+                }
+                if (!ref && det) {
+                  ref = det.documentUrl || det.originUrl || '';
+                }
+                return ref;
+              };
+
+              const getHostname = (u) => {
+                if (!u) return '';
+                try { return new URL(u).hostname; } catch { return ''; }
+              };
+
               // Background security scanning - runs even when DevTools is closed
               if (captureEnabled && SecurityScanner.isScannable(contentType)) {
                 const scanResults = SecurityScanner.scan(text, details.url);
                 if (scanResults && scanResults.totalFindings > 0) {
+                  const refUrl = getRequestReferer(request, details);
                   scanResults.requestId = request.id;
+                  scanResults.domain = getHostname(details.url);
+                  scanResults.referer = refUrl;
+                  scanResults.refererDomain = getHostname(refUrl);
                   securityFindings.push(scanResults);
                   
                   // Limit stored findings
@@ -1429,7 +1459,11 @@ browser.webRequest.onHeadersReceived.addListener(
                 if (isJs) {
                   const libResults = LibraryScanner.scan(details.url, text);
                   if (libResults && libResults.totalFindings > 0) {
+                    const refUrl = getRequestReferer(request, details);
                     libResults.requestId = request.id;
+                    libResults.domain = getHostname(details.url);
+                    libResults.referer = refUrl;
+                    libResults.refererDomain = getHostname(refUrl);
                     libraryFindings.push(libResults);
                     
                     // Limit stored findings
@@ -1745,15 +1779,13 @@ async function resendModifiedRequest(request, modifiedRequest) {
         const blob = await response.blob();
         const arrayBuffer = await blob.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
-        let binary = '';
-        for (let i = 0; i < uint8Array.byteLength; i++) {
-          binary += String.fromCharCode(uint8Array[i]);
-        }
-        responseBody = btoa(binary);
+        responseBody = safeUint8ArrayToBase64(uint8Array);
         request.isBase64 = true;
       } else {
         responseBody = await response.text();
-        responseBody = responseBody.substring(0, 50000);
+        if (responseBody.length > 2000000) {
+          responseBody = responseBody.substring(0, 2000000) + '\n... [Truncated at 2MB]';
+        }
         request.isBase64 = false;
       }
       

@@ -26,7 +26,10 @@
                     <span>Automated Scanner</span>
                     <span id="securityBadge" class="security-badge" style="display: none;">0</span>
                 </button>
-                <button id="filterBtn" class="btn">Filters ▼</button>
+                <button id="filterBtn" class="btn">
+                    Filters ▼
+                    <span id="activeFilterBadge" class="active-filter-badge" style="display: none;">0</span>
+                </button>
                 <button id="themeToggleBtn" class="theme-toggle-btn" title="Toggle theme">
                     <span class="theme-icon">🌙</span>
                 </button>
@@ -43,33 +46,92 @@
         </div>
         
         <div class="filter-panel" id="filterPanel" style="display: none;">
-            <div class="filter-section">
-                <label class="filter-label">Hide resource types:</label>
-                <div class="filter-options">
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-image" data-type="image">
-                        <span>Images</span>
-                    </label>
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-script" data-type="script">
-                        <span>JS Files</span>
-                    </label>
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-stylesheet" data-type="stylesheet">
-                        <span>CSS Files</span>
-                    </label>
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-font" data-type="font">
-                        <span>Fonts</span>
-                    </label>
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-media" data-type="media">
-                        <span>Media</span>
-                    </label>
-                    <label class="filter-checkbox">
-                        <input type="checkbox" id="filter-websocket" data-type="websocket">
-                        <span>WebSocket</span>
-                    </label>
+            <!-- Presets & Quick Controls -->
+            <div class="filter-presets-bar">
+                <span class="filter-presets-label">⚡ Presets:</span>
+                <button class="btn btn-sm filter-preset-btn" data-preset="xhr">XHR / Fetch Only</button>
+                <button class="btn btn-sm filter-preset-btn" data-preset="failed">Failed Requests Only</button>
+                <button class="btn btn-sm filter-preset-btn" data-preset="mutating">Data Mutating Only</button>
+                <button class="btn btn-sm filter-preset-btn" data-preset="all">Show All</button>
+                <button class="btn btn-sm filter-reset-btn" id="resetAllFiltersBtn">Reset All Filters</button>
+            </div>
+
+            <!-- Filter Grid -->
+            <div class="filter-grid">
+                <!-- Hide Resource Types -->
+                <div class="filter-section">
+                    <label class="filter-label">Hide resource types:</label>
+                    <div class="filter-options">
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-image" data-type="image">
+                            <span>Images</span>
+                        </label>
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-script" data-type="script">
+                            <span>JS Files</span>
+                        </label>
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-stylesheet" data-type="stylesheet">
+                            <span>CSS Files</span>
+                        </label>
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-font" data-type="font">
+                            <span>Fonts</span>
+                        </label>
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-media" data-type="media">
+                            <span>Media</span>
+                        </label>
+                        <label class="filter-checkbox">
+                            <input type="checkbox" id="filter-websocket" data-type="websocket">
+                            <span>WebSocket</span>
+                        </label>
+                        <label class="filter-checkbox filter-security-only-checkbox">
+                            <input type="checkbox" id="filter-security-only">
+                            <span>🛡️ Has Security Findings Only</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- HTTP Methods Filter -->
+                <div class="filter-section">
+                    <label class="filter-label">HTTP Methods:</label>
+                    <div class="filter-options" id="methodFilterOptions">
+                        <label class="filter-checkbox"><input type="checkbox" data-method="GET" checked><span>GET</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="POST" checked><span>POST</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="PUT" checked><span>PUT</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="DELETE" checked><span>DELETE</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="PATCH" checked><span>PATCH</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="OPTIONS" checked><span>OPTIONS</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-method="HEAD" checked><span>HEAD</span></label>
+                    </div>
+                </div>
+
+                <!-- Status Codes Filter -->
+                <div class="filter-section">
+                    <label class="filter-label">Status Codes:</label>
+                    <div class="filter-options" id="statusFilterOptions">
+                        <label class="filter-checkbox"><input type="checkbox" data-status="2xx" checked><span>2xx Success</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-status="3xx" checked><span>3xx Redirection</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-status="4xx" checked><span>4xx Client Error</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-status="5xx" checked><span>5xx Server Error</span></label>
+                        <label class="filter-checkbox"><input type="checkbox" data-status="0" checked><span>Status 0 / Failed</span></label>
+                    </div>
+                </div>
+
+                <!-- Domain Filter with Live Search -->
+                <div class="filter-section filter-domain-section">
+                    <label class="filter-label">Target Domains:</label>
+                    <div class="domain-filter-container">
+                        <div class="domain-search-wrapper">
+                            <input type="text" id="domainSearchInput" placeholder="Search domains..." class="domain-search-input">
+                            <button class="btn btn-sm" id="domainSelectAllBtn">Select All</button>
+                            <button class="btn btn-sm" id="domainClearAllBtn">Clear</button>
+                        </div>
+                        <div class="domain-list" id="domainFilterList">
+                            <div class="domain-empty-hint">No domains captured yet</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -587,27 +649,27 @@
             </div>
             <div class="security-modal-container">
                 <div class="security-summary" id="securitySummary">
-                    <div class="summary-item critical">
+                    <div class="summary-item critical" data-category="apiKeys" tabindex="0" title="Filter by API Keys">
                         <span class="summary-count" id="summaryApiKeys">0</span>
                         <span class="summary-label">API Keys</span>
                     </div>
-                    <div class="summary-item high">
+                    <div class="summary-item high" data-category="credentials" tabindex="0" title="Filter by Credentials">
                         <span class="summary-count" id="summaryCredentials">0</span>
                         <span class="summary-label">Credentials</span>
                     </div>
-                    <div class="summary-item medium" id="summaryLibrariesItem">
+                    <div class="summary-item medium" id="summaryLibrariesItem" data-category="vulnerableLibraries" tabindex="0" title="Filter by JS Libs">
                         <span class="summary-count" id="summaryLibraries">0</span>
                         <span class="summary-label">JS Libs</span>
                     </div>
-                    <div class="summary-item low">
+                    <div class="summary-item low" data-category="emails" tabindex="0" title="Filter by Emails">
                         <span class="summary-count" id="summaryEmails">0</span>
                         <span class="summary-label">Emails</span>
                     </div>
-                    <div class="summary-item info">
+                    <div class="summary-item info" data-category="apiEndpoints" tabindex="0" title="Filter by Endpoints">
                         <span class="summary-count" id="summaryEndpoints">0</span>
                         <span class="summary-label">Endpoints</span>
                     </div>
-                    <div class="summary-item info">
+                    <div class="summary-item info" data-category="paths" tabindex="0" title="Filter by Paths">
                         <span class="summary-count" id="summaryPaths">0</span>
                         <span class="summary-label">Paths</span>
                     </div>
@@ -632,6 +694,12 @@
                         <option value="medium">Medium</option>
                         <option value="low">Low</option>
                         <option value="info">Info</option>
+                    </select>
+                    <select id="securityDomainFilter" class="security-domain-filter">
+                        <option value="all">All Target Domains</option>
+                    </select>
+                    <select id="securityRefererFilter" class="security-referer-filter">
+                        <option value="all">All Referer Origins</option>
                     </select>
                     <button class="btn" id="clearSecurityFindingsBtn">Clear All</button>
                     <button class="btn" id="exportAllSecurityBtn">Export JSON</button>

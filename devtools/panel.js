@@ -12,6 +12,10 @@ let currentTab = 'request';
 let interceptedRequest = null;
 let interceptQueue = [];
 let hiddenTypes = new Set();
+let selectedMethods = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']);
+let selectedStatusGroups = new Set(['2xx', '3xx', '4xx', '5xx', '0']);
+let selectedDomains = new Set(); // Empty set means all domains implicitly allowed
+let securityOnlyFilter = false;
 let interceptSettings = {
     methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
     includeGET: false,
@@ -527,12 +531,23 @@ const securityFindingsList = document.getElementById('securityFindingsList');
 const securitySearchInput = document.getElementById('securitySearchInput');
 const securityCategoryFilter = document.getElementById('securityCategoryFilter');
 const securitySeverityFilter = document.getElementById('securitySeverityFilter');
+const securityDomainFilter = document.getElementById('securityDomainFilter');
+const securityRefererFilter = document.getElementById('securityRefererFilter');
 const clearSecurityFindingsBtn = document.getElementById('clearSecurityFindingsBtn');
 const exportAllSecurityBtn = document.getElementById('exportAllSecurityBtn');
 const securityTabBtn = document.getElementById('securityTabBtn');
 const securityTabBadge = document.getElementById('securityTabBadge');
 const securityTabContent = document.getElementById('securityTabContent');
 const exportSecurityFindingsBtn = document.getElementById('exportSecurityFindingsBtn');
+
+// Filter Panel Expanded Elements
+const filterSecurityOnly = document.getElementById('filter-security-only');
+const activeFilterBadge = document.getElementById('activeFilterBadge');
+const resetAllFiltersBtn = document.getElementById('resetAllFiltersBtn');
+const domainSearchInput = document.getElementById('domainSearchInput');
+const domainFilterList = document.getElementById('domainFilterList');
+const domainSelectAllBtn = document.getElementById('domainSelectAllBtn');
+const domainClearAllBtn = document.getElementById('domainClearAllBtn');
 
 let currentRepeaterTab = 'headers';
 let lastRepeaterResponse = null;
@@ -810,6 +825,7 @@ securitySearchInput.addEventListener('input', () => {
 
 // Security Category Filter
 securityCategoryFilter.addEventListener('change', () => {
+    updateActiveSummaryChips();
     renderSecurityFindingsList();
 });
 
@@ -817,6 +833,45 @@ securityCategoryFilter.addEventListener('change', () => {
 securitySeverityFilter.addEventListener('change', () => {
     renderSecurityFindingsList();
 });
+
+// Security Domain Filter
+if (securityDomainFilter) {
+    securityDomainFilter.addEventListener('change', () => {
+        renderSecurityFindingsList();
+    });
+}
+
+// Security Referer Filter
+if (securityRefererFilter) {
+    securityRefererFilter.addEventListener('change', () => {
+        renderSecurityFindingsList();
+    });
+}
+
+// Interactive Summary Chips (Quick Filtering)
+document.addEventListener('click', (e) => {
+    const chip = e.target.closest('#securitySummary .summary-item[data-category]');
+    if (!chip) return;
+    const category = chip.dataset.category;
+    if (securityCategoryFilter.value === category) {
+        securityCategoryFilter.value = 'all';
+    } else {
+        securityCategoryFilter.value = category;
+    }
+    updateActiveSummaryChips();
+    renderSecurityFindingsList();
+});
+
+function updateActiveSummaryChips() {
+    const activeCat = securityCategoryFilter.value;
+    document.querySelectorAll('#securitySummary .summary-item[data-category]').forEach(chip => {
+        if (chip.dataset.category === activeCat) {
+            chip.classList.add('active');
+        } else {
+            chip.classList.remove('active');
+        }
+    });
+}
 
 // Clear All Security Findings
 clearSecurityFindingsBtn.addEventListener('click', () => {
@@ -826,6 +881,14 @@ clearSecurityFindingsBtn.addEventListener('click', () => {
         requestFindings.clear();
         requestLibraryFindings.clear();
         unseenFindingsCount = 0;
+        
+        // Reset security flags on all existing captured requests to prevent re-scanning
+        requests.forEach(req => {
+            req.hasSecurityFindings = false;
+            req.securityFindingsCount = 0;
+            req.clearedSecurity = true;
+        });
+
         updateSecurityBadge();
         renderSecurityModal();
         renderRequestList(); // Update request list to remove security indicators
@@ -946,14 +1009,27 @@ function renderSecurityModal() {
     // Update summary counts
     let apiKeyCount = 0, credentialCount = 0, emailCount = 0, endpointCount = 0, pathCount = 0, libraryCount = 0;
     
+    // Track unique domains and referers for filter dropdowns
+    const domains = new Set();
+    const referers = new Set();
+
+    const addMeta = (f) => {
+        let d = f.domain;
+        if (!d && f.url) { try { d = new URL(f.url).hostname; } catch(e){} }
+        if (d) domains.add(d);
+
+        let r = f.refererDomain;
+        if (!r && f.referer) { try { r = new URL(f.referer).hostname; } catch(e){} }
+        if (r) referers.add(r);
+    };
+    
     securityFindings.forEach(finding => {
-        // Handle findings from both panel scanner and background scanner
-        // Background scanner only provides apiKeys and credentials
         apiKeyCount += (finding.apiKeys || []).length;
         credentialCount += (finding.credentials || []).length;
         emailCount += (finding.emails || []).length;
         endpointCount += (finding.apiEndpoints || []).length;
         pathCount += (finding.paths || []).length;
+        addMeta(finding);
     });
     
     // Count unique vulnerable library+version combinations
@@ -962,6 +1038,7 @@ function renderSecurityModal() {
         (finding.libraries || []).forEach(lib => {
             uniqueLibs.add(`${lib.library}@${lib.version}`);
         });
+        addMeta(finding);
     });
     libraryCount = uniqueLibs.size;
     
@@ -976,6 +1053,34 @@ function renderSecurityModal() {
     const totalSignificant = apiKeyCount + credentialCount + libraryCount;
     document.getElementById('securityModalBadge').textContent = totalSignificant;
     
+    // Populate Domain Filter Options
+    if (securityDomainFilter) {
+        const selectedDom = securityDomainFilter.value;
+        securityDomainFilter.innerHTML = '<option value="all">All Target Domains</option>';
+        Array.from(domains).sort().forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d;
+            opt.textContent = d;
+            if (d === selectedDom) opt.selected = true;
+            securityDomainFilter.appendChild(opt);
+        });
+    }
+
+    // Populate Referer Filter Options
+    if (securityRefererFilter) {
+        const selectedRef = securityRefererFilter.value;
+        securityRefererFilter.innerHTML = '<option value="all">All Referer Origins</option>';
+        Array.from(referers).sort().forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r;
+            opt.textContent = r;
+            if (r === selectedRef) opt.selected = true;
+            securityRefererFilter.appendChild(opt);
+        });
+    }
+
+    updateActiveSummaryChips();
+    
     // Render the findings list
     renderSecurityFindingsList();
 }
@@ -987,6 +1092,8 @@ function renderSecurityFindingsList() {
     const searchTerm = securitySearchInput.value.toLowerCase();
     const categoryFilter = securityCategoryFilter.value;
     const severityFilter = securitySeverityFilter.value;
+    const domainFilter = securityDomainFilter ? securityDomainFilter.value : 'all';
+    const refererFilter = securityRefererFilter ? securityRefererFilter.value : 'all';
     
     securityFindingsList.innerHTML = '';
     
@@ -1005,9 +1112,25 @@ function renderSecurityFindingsList() {
     // Group findings by URL
     const groupedFindings = new Map();
     
+    // Helper to match domain & referer filters
+    const matchesDomainAndReferer = (finding) => {
+        if (domainFilter !== 'all') {
+            let d = finding.domain;
+            if (!d && finding.url) { try { d = new URL(finding.url).hostname; } catch(e){} }
+            if (d !== domainFilter) return false;
+        }
+        if (refererFilter !== 'all') {
+            let r = finding.refererDomain;
+            if (!r && finding.referer) { try { r = new URL(finding.referer).hostname; } catch(e){} }
+            if (r !== refererFilter) return false;
+        }
+        return true;
+    };
+
     // Process security findings
     if (categoryFilter !== 'vulnerableLibraries') {
         securityFindings.forEach(finding => {
+            if (!matchesDomainAndReferer(finding)) return;
             const url = finding.url;
             if (!groupedFindings.has(url)) {
                 groupedFindings.set(url, {
@@ -1043,6 +1166,7 @@ function renderSecurityFindingsList() {
                         
                         group.items.push({
                             ...item,
+                            category: cat,
                             requestId: finding.requestId,
                             sourceUrl: finding.url
                         });
@@ -1058,6 +1182,7 @@ function renderSecurityFindingsList() {
         const libraryVulnMap = new Map(); // key: "url|library|version" -> { vulns: [], ... }
         
         libraryFindings.forEach(finding => {
+            if (!matchesDomainAndReferer(finding)) return;
             const url = finding.url;
             
             (finding.libraries || []).forEach(lib => {
@@ -1151,10 +1276,27 @@ function renderSecurityFindingsList() {
         // Group header
         const headerEl = document.createElement('div');
         headerEl.className = 'finding-group-header';
+        headerEl.style.display = 'flex';
+        headerEl.style.alignItems = 'center';
+        headerEl.style.justifyContent = 'space-between';
+        
         headerEl.innerHTML = `
-            <span class="finding-group-url" title="${escapeHTML(url)}">${escapeHTML(url)}</span>
-            <span class="finding-group-count">${group.items.length}</span>
+            <div style="display:flex;align-items:center;gap:8px;overflow:hidden;flex:1;">
+                <span class="finding-group-url" title="${escapeHTML(url)}">${escapeHTML(url)}</span>
+                <span class="finding-group-count">${group.items.length}</span>
+            </div>
+            ${group.requestId ? `<button class="finding-action-btn finding-goto-btn" data-request-id="${escapeHTML(group.requestId)}">Go to Request ↗</button>` : ''}
         `;
+
+        if (group.requestId) {
+            const gotoBtn = headerEl.querySelector('.finding-goto-btn');
+            if (gotoBtn) {
+                gotoBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    navigateToRequest(group.requestId);
+                };
+            }
+        }
         
         // Group items container
         const itemsEl = document.createElement('div');
@@ -1192,20 +1334,58 @@ function navigateToRequest(requestId) {
     // Find the request
     const request = requests.find(r => r.id === requestId);
     if (!request) return;
+
+    let needsReRender = false;
+
+    // Reset search filter if active and hiding the target request
+    if (searchInput && searchInput.value) {
+        searchInput.value = '';
+        needsReRender = true;
+    }
+
+    // Unhide request type if hidden by filter checkboxes (e.g. script, stylesheet, image)
+    if (request.type && hiddenTypes.has(request.type)) {
+        hiddenTypes.delete(request.type);
+        document.querySelectorAll('.filter-checkbox input').forEach(cb => {
+            if (cb.dataset.type === request.type) cb.checked = true;
+        });
+        needsReRender = true;
+    }
+
+    if (needsReRender) {
+        renderRequestList();
+    }
     
     // Select the request
     selectedRequest = request;
     displayRequestDetails(request);
     
     // Highlight and scroll to the row in the request list
-    const rows = document.querySelectorAll('#requestList tr');
-    rows.forEach(row => {
-        row.classList.remove('selected');
-        if (row.dataset.requestId === requestId) {
-            row.classList.add('selected');
-            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => {
+        const rows = document.querySelectorAll('#requestList tr');
+        let foundRow = false;
+        rows.forEach(row => {
+            if (row.dataset.requestId === requestId) {
+                row.classList.add('selected');
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                foundRow = true;
+            } else {
+                row.classList.remove('selected');
+            }
+        });
+
+        // Fallback: If row was not found in DOM, re-render request list and try once more
+        if (!foundRow) {
+            renderRequestList();
+            const reRows = document.querySelectorAll('#requestList tr');
+            reRows.forEach(row => {
+                if (row.dataset.requestId === requestId) {
+                    row.classList.add('selected');
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            });
         }
-    });
+    }, 50);
 }
 
 /**
@@ -1250,9 +1430,10 @@ function createLibraryFindingElement(item, id) {
         
         let infoLinks = '';
         try {
-            infoLinks = (vuln.info || []).slice(0, 3).map(url => 
-                `<a href="${escapeHTML(url)}" target="_blank" class="info-link" title="${escapeHTML(url)}">${escapeHTML(new URL(url).hostname)}</a>`
-            ).join(' ');
+            infoLinks = (vuln.info || []).slice(0, 3)
+                .filter(url => isSafeHttpUrl(url))
+                .map(url => `<a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer" class="info-link" title="${escapeHTML(url)}">${escapeHTML(new URL(url).hostname)}</a>`)
+                .join(' ');
         } catch (e) {
             // Invalid URL, skip
         }
@@ -1336,16 +1517,86 @@ function createFindingItemElement(item, id) {
     const sourceDisplay = item.sourceUrl
         ? (item.sourceUrl.length > 80 ? '...' + item.sourceUrl.slice(-77) : item.sourceUrl)
         : '';
+
+    const rawVal = item.extractedValue || item.match || '';
+    const isSensitiveCategory = ['apiKeys', 'credentials', 'secrets'].includes(item.category) || ['critical', 'high'].includes(severity);
+    
+    const maskValue = (str) => {
+        if (!str) return '';
+        if (str.length <= 8) return '••••••••';
+        return str.substring(0, 4) + '•'.repeat(Math.min(12, str.length - 8)) + str.slice(-4);
+    };
+
+    const maskedVal = isSensitiveCategory ? maskValue(rawVal) : rawVal;
+
+    // Highlight match token in context if available
+    let formattedContext = '';
+    if (item.context) {
+        const escapedCtx = escapeHTML(item.context);
+        const escapedMatch = escapeHTML(item.match || '');
+        if (escapedMatch && escapedCtx.includes(escapedMatch)) {
+            const regex = new RegExp(escapedMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+            formattedContext = escapedCtx.replace(regex, `<mark class="finding-match-highlight">${escapedMatch}</mark>`);
+        } else {
+            formattedContext = escapedCtx;
+        }
+    }
     
     body.innerHTML = `
-        <div class="finding-match">${escapeHTML(item.match)}</div>
-        ${item.context ? `<div class="finding-context">${escapeHTML(item.context)}</div>` : ''}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
+            <div class="finding-match" style="margin-bottom:0;flex:1;">${escapeHTML(maskedVal)}</div>
+            <div style="display:flex;gap:6px;flex-shrink:0;">
+                ${isSensitiveCategory ? `<button class="finding-action-btn mask-btn" title="Toggle masking">👁️ Unmask</button>` : ''}
+                <button class="finding-action-btn copy-btn" title="Copy to clipboard">📋 Copy</button>
+            </div>
+        </div>
+        ${formattedContext ? `<div class="finding-context">${formattedContext}</div>` : ''}
         <div class="finding-meta">
             ${item.line ? `<span>Line: ${item.line}</span>` : ''}
-            ${item.extractedValue && item.extractedValue !== item.match ? `<span>Value: ${escapeHTML(item.extractedValue.substring(0, 50))}${item.extractedValue.length > 50 ? '...' : ''}</span>` : ''}
+            ${item.extractedValue && item.extractedValue !== item.match ? `<span>Value: ${escapeHTML(isSensitiveCategory ? maskValue(item.extractedValue) : item.extractedValue.substring(0, 50))}</span>` : ''}
         </div>
         ${item.sourceUrl ? `<div class="finding-source"><span class="finding-source-label">Source:</span> <a class="finding-source-link" title="${escapeHTML(item.sourceUrl)}">${escapeHTML(sourceDisplay)}</a></div>` : ''}
     `;
+
+    // Attach Copy button event listener
+    const copyBtn = body.querySelector('.copy-btn');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(rawVal).then(() => {
+                    copyBtn.textContent = 'Copied!';
+                    setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+                }).catch(() => {
+                    copyBtn.textContent = 'Copied!';
+                    setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+                });
+            } else {
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+            }
+        });
+    }
+
+    // Attach Mask toggle button event listener
+    const maskBtn = body.querySelector('.mask-btn');
+    if (maskBtn) {
+        let isMasked = true;
+        maskBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const matchEl = body.querySelector('.finding-match');
+            if (!matchEl) return;
+            if (isMasked) {
+                matchEl.textContent = rawVal;
+                maskBtn.textContent = '🔒 Mask';
+                isMasked = false;
+            } else {
+                matchEl.textContent = maskedVal;
+                maskBtn.textContent = '👁️ Unmask';
+                isMasked = true;
+            }
+        });
+    }
     
     // Attach click handler on source link to navigate to the request
     if (item.sourceUrl && item.requestId) {
@@ -1528,6 +1779,200 @@ if (savedHiddenTypes) {
 searchInput.addEventListener('input', () => {
     renderRequestList();
 });
+
+// ==========================================
+// EXPANDED FILTER PANEL LOGIC & HELPERS
+// ==========================================
+
+function renderDomainFilterList() {
+    if (!domainFilterList) return;
+    const capturedDomains = new Set();
+    requests.forEach(r => {
+        if (!r.url) return;
+        try {
+            const host = new URL(r.url).hostname;
+            if (host) capturedDomains.add(host);
+        } catch(e){}
+    });
+
+    const search = (domainSearchInput ? domainSearchInput.value : '').toLowerCase().trim();
+    const sortedDomains = Array.from(capturedDomains).sort();
+    const matchingDomains = sortedDomains.filter(d => !search || d.toLowerCase().includes(search));
+
+    domainFilterList.innerHTML = '';
+    if (matchingDomains.length === 0) {
+        domainFilterList.innerHTML = '<div class="domain-empty-hint">No matching domains</div>';
+        return;
+    }
+
+    matchingDomains.forEach(dom => {
+        const item = document.createElement('label');
+        item.className = 'domain-item';
+        const isChecked = selectedDomains.size === 0 || selectedDomains.has(dom);
+        item.innerHTML = `
+            <input type="checkbox" data-domain="${escapeHTML(dom)}" ${isChecked ? 'checked' : ''}>
+            <span>${escapeHTML(dom)}</span>
+        `;
+        const cb = item.querySelector('input');
+        cb.addEventListener('change', () => {
+            if (selectedDomains.size === 0) {
+                sortedDomains.forEach(d => selectedDomains.add(d));
+            }
+            if (cb.checked) {
+                selectedDomains.add(dom);
+                if (selectedDomains.size >= sortedDomains.length) {
+                    selectedDomains.clear();
+                }
+            } else {
+                selectedDomains.delete(dom);
+            }
+            updateActiveFilterBadge();
+            renderRequestList();
+        });
+        domainFilterList.appendChild(item);
+    });
+}
+
+function updateActiveFilterBadge() {
+    let count = 0;
+    count += hiddenTypes.size;
+    if (selectedMethods.size < 7) count += (7 - selectedMethods.size);
+    if (selectedStatusGroups.size < 5) count += (5 - selectedStatusGroups.size);
+    if (selectedDomains.size > 0) count += 1;
+    if (securityOnlyFilter) count += 1;
+
+    if (activeFilterBadge) {
+        if (count > 0) {
+            activeFilterBadge.textContent = count;
+            activeFilterBadge.style.display = 'inline-flex';
+        } else {
+            activeFilterBadge.style.display = 'none';
+        }
+    }
+}
+
+function resetAllFilters() {
+    hiddenTypes.clear();
+    localStorage.removeItem('hiddenTypes');
+    document.querySelectorAll('.filter-options input[data-type]').forEach(cb => cb.checked = false);
+
+    selectedMethods = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']);
+    document.querySelectorAll('#methodFilterOptions input').forEach(cb => cb.checked = true);
+
+    selectedStatusGroups = new Set(['2xx', '3xx', '4xx', '5xx', '0']);
+    document.querySelectorAll('#statusFilterOptions input').forEach(cb => cb.checked = true);
+
+    selectedDomains.clear();
+    if (domainSearchInput) domainSearchInput.value = '';
+
+    securityOnlyFilter = false;
+    if (filterSecurityOnly) filterSecurityOnly.checked = false;
+
+    updateActiveFilterBadge();
+    renderDomainFilterList();
+    renderRequestList();
+}
+
+// Method Filter Listeners
+document.querySelectorAll('#methodFilterOptions input[data-method]').forEach(cb => {
+    cb.addEventListener('change', () => {
+        const method = cb.dataset.method;
+        if (cb.checked) {
+            selectedMethods.add(method);
+        } else {
+            selectedMethods.delete(method);
+        }
+        updateActiveFilterBadge();
+        renderRequestList();
+    });
+});
+
+// Status Code Filter Listeners
+document.querySelectorAll('#statusFilterOptions input[data-status]').forEach(cb => {
+    cb.addEventListener('change', () => {
+        const status = cb.dataset.status;
+        if (cb.checked) {
+            selectedStatusGroups.add(status);
+        } else {
+            selectedStatusGroups.delete(status);
+        }
+        updateActiveFilterBadge();
+        renderRequestList();
+    });
+});
+
+// Security Only Filter Listener
+if (filterSecurityOnly) {
+    filterSecurityOnly.addEventListener('change', () => {
+        securityOnlyFilter = filterSecurityOnly.checked;
+        updateActiveFilterBadge();
+        renderRequestList();
+    });
+}
+
+// Domain Search Input
+if (domainSearchInput) {
+    domainSearchInput.addEventListener('input', () => {
+        renderDomainFilterList();
+    });
+}
+
+// Domain Select All
+if (domainSelectAllBtn) {
+    domainSelectAllBtn.addEventListener('click', () => {
+        selectedDomains.clear();
+        updateActiveFilterBadge();
+        renderDomainFilterList();
+        renderRequestList();
+    });
+}
+
+// Domain Clear All
+if (domainClearAllBtn) {
+    domainClearAllBtn.addEventListener('click', () => {
+        selectedDomains.clear();
+        selectedDomains.add('__NONE__');
+        updateActiveFilterBadge();
+        renderDomainFilterList();
+        renderRequestList();
+    });
+}
+
+// Filter Preset Buttons
+document.querySelectorAll('.filter-preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const preset = btn.dataset.preset;
+        if (preset === 'xhr') {
+            ['image', 'script', 'stylesheet', 'font', 'media', 'websocket'].forEach(t => hiddenTypes.add(t));
+            document.querySelectorAll('.filter-options input[data-type]').forEach(cb => cb.checked = true);
+            selectedMethods = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']);
+            document.querySelectorAll('#methodFilterOptions input').forEach(cb => cb.checked = true);
+            selectedStatusGroups = new Set(['2xx', '3xx', '4xx', '5xx', '0']);
+            document.querySelectorAll('#statusFilterOptions input').forEach(cb => cb.checked = true);
+        } else if (preset === 'failed') {
+            selectedStatusGroups = new Set(['4xx', '5xx', '0']);
+            document.querySelectorAll('#statusFilterOptions input').forEach(cb => {
+                cb.checked = ['4xx', '5xx', '0'].includes(cb.dataset.status);
+            });
+        } else if (preset === 'mutating') {
+            selectedMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+            document.querySelectorAll('#methodFilterOptions input').forEach(cb => {
+                cb.checked = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(cb.dataset.method);
+            });
+        } else if (preset === 'all') {
+            resetAllFilters();
+            return;
+        }
+        updateActiveFilterBadge();
+        renderRequestList();
+    });
+});
+
+if (resetAllFiltersBtn) {
+    resetAllFiltersBtn.addEventListener('click', () => {
+        resetAllFilters();
+    });
+}
 
 // Add sorting functionality to table headers
 document.querySelectorAll('#requestTable th[data-column]').forEach(th => {
@@ -1901,7 +2346,7 @@ port.onMessage.addListener((msg) => {
             requestCounter++;
             msg.request.requestNumber = requestCounter;
             requests.push(msg.request);
-            if (requests.length > 100) {
+            if (requests.length > 1000) {
                 requests.shift();
             }
             renderRequestList();
@@ -1917,16 +2362,21 @@ port.onMessage.addListener((msg) => {
                 // Preserve the request number when updating
                 msg.request.requestNumber = requests[index].requestNumber;
                 
-                // Preserve security findings if already scanned
-                if (requests[index].hasSecurityFindings) {
+                // Preserve clearedSecurity flag if request was cleared
+                if (requests[index].clearedSecurity) {
+                    msg.request.clearedSecurity = true;
+                }
+                
+                // Preserve security findings if already scanned and not cleared
+                if (requests[index].hasSecurityFindings && !requests[index].clearedSecurity) {
                     msg.request.hasSecurityFindings = requests[index].hasSecurityFindings;
                     msg.request.securityFindingsCount = requests[index].securityFindingsCount;
                 }
                 
                 requests[index] = msg.request;
                 
-                // Scan response body for security issues if not already scanned
-                if (msg.request.responseBody && !requestFindings.has(msg.request.id) && captureToggle.checked) {
+                // Scan response body for security issues if not already scanned and not cleared
+                if (msg.request.responseBody && !requestFindings.has(msg.request.id) && !msg.request.clearedSecurity && captureToggle.checked) {
                     const scanResults = scanRequestForSecurity(msg.request);
                     if (scanResults) {
                         processSecurityResults(msg.request, scanResults);
@@ -1999,8 +2449,14 @@ port.onMessage.addListener((msg) => {
             securityFindings = [];
             requestFindings.clear();
             unseenFindingsCount = 0;
+            requests.forEach(req => {
+                req.hasSecurityFindings = false;
+                req.securityFindingsCount = 0;
+                req.clearedSecurity = true;
+            });
             updateSecurityBadge();
-            renderSecurityFindingsList();
+            renderSecurityModal();
+            renderRequestList();
             break;
             
         case 'securityFindingsResponse':
@@ -2013,7 +2469,7 @@ port.onMessage.addListener((msg) => {
                 });
                 unseenFindingsCount = msg.findings.reduce((acc, f) => acc + f.totalFindings, 0);
                 updateSecurityBadge();
-                renderSecurityFindingsList();
+                renderSecurityModal();
             }
             break;
             
@@ -2023,7 +2479,7 @@ port.onMessage.addListener((msg) => {
                 libraryFindings.push(msg.finding);
                 unseenFindingsCount += msg.finding.totalFindings;
                 updateSecurityBadge();
-                renderSecurityFindingsList();
+                renderSecurityModal();
             }
             break;
             
@@ -2031,7 +2487,7 @@ port.onMessage.addListener((msg) => {
             libraryFindings = [];
             requestLibraryFindings.clear();
             updateSecurityBadge();
-            renderSecurityFindingsList();
+            renderSecurityModal();
             break;
             
         case 'libraryFindingsResponse':
@@ -2193,12 +2649,47 @@ function sortRequests(requests) {
 function renderRequestList() {
     const searchTerm = searchInput.value.toLowerCase();
     
+    // Update domain list options and active badge count
+    renderDomainFilterList();
+    updateActiveFilterBadge();
+
     const filteredRequests = requests.filter(req => {
-        // Filter by hidden types
+        // Filter by hidden resource types
         if (hiddenTypes.has(req.type)) {
             return false;
         }
         
+        // Filter by HTTP Method
+        const method = (req.method || 'GET').toUpperCase();
+        if (selectedMethods.size > 0 && !selectedMethods.has(method)) {
+            return false;
+        }
+
+        // Filter by Status Code
+        const status = req.statusCode || 0;
+        let statusGroup = '0';
+        if (status >= 200 && status < 300) statusGroup = '2xx';
+        else if (status >= 300 && status < 400) statusGroup = '3xx';
+        else if (status >= 400 && status < 500) statusGroup = '4xx';
+        else if (status >= 500) statusGroup = '5xx';
+        if (selectedStatusGroups.size > 0 && !selectedStatusGroups.has(statusGroup)) {
+            return false;
+        }
+
+        // Filter by Target Domain
+        if (selectedDomains.size > 0) {
+            let domain = '';
+            try { domain = new URL(req.url).hostname; } catch(e){}
+            if (!selectedDomains.has(domain)) {
+                return false;
+            }
+        }
+
+        // Filter by Has Security Findings Only
+        if (securityOnlyFilter && !req.hasSecurityFindings) {
+            return false;
+        }
+
         // Filter by search term
         if (!searchTerm) return true;
         
@@ -2487,8 +2978,8 @@ function highlightSyntax(code, language) {
             return '<span class="' + cls + '">' + match + '</span>';
         });
     } else if (language === 'xml' || language === 'html') {
-        return code.replace(/(&lt;\/?)(\w+)(.*?)(\/?&gt;)/g, function(match, start, tag, attrs, end) {
-            let formattedAttrs = attrs.replace(/(\s+)(\w+)(?:(=)("[^"]*"))?/g, '$1<span class="syntax-attr">$2</span>$3<span class="syntax-value">$4</span>');
+        return code.replace(/(&lt;\/?)([\w:-]+)(.*?)(\/?&gt;)/g, function(match, start, tag, attrs, end) {
+            let formattedAttrs = attrs.replace(/(\s+)([\w:-]+)(?:(=)(&quot;[^&]*&quot;|"[^"]*"|'[^']*'|[^\s&>]+))?/g, '$1<span class="syntax-attr">$2</span>$3<span class="syntax-value">$4</span>');
             return start + '<span class="syntax-tag">' + tag + '</span>' + formattedAttrs + end;
         });
     }
@@ -2593,16 +3084,17 @@ function formatResponseContent(request, view) {
         } else {
             // Try to encode it
             try {
-                imgSrc = `data:${contentType};base64,${btoa(request.responseBody)}`;
+                imgSrc = `data:${contentType};base64,${safeStringToBase64(request.responseBody)}`;
             } catch (e) {
-                // If btoa fails, show error
-                return { isImage: false, isHTML: false, content: `Error rendering image: ${e.message}` };
+                // If encoding fails, show error
+                return { isImage: false, isHTML: false, content: `Error rendering image: ${escapeHTML(e.message)}` };
             }
         }
         
+        const escapedImgSrc = escapeHTML(imgSrc);
         const imageHtml = `<div class="response-image-container">
             <div class="response-headers">${escapeHTML(headers)}</div>
-            <img src="${imgSrc}" alt="Response Image" class="response-image" onerror="this.style.display='none'; this.parentElement.innerHTML += '<div style=\\'padding: 20px; color: #f44336;\\'>Failed to load image</div>';" />
+            <img src="${escapedImgSrc}" alt="Response Image" class="response-image" onerror="this.style.display='none'; if (!this.dataset.errored) { this.dataset.errored = 'true'; const errDiv = document.createElement('div'); errDiv.style.cssText = 'padding: 20px; color: #f44336;'; errDiv.textContent = 'Failed to load image'; this.parentElement.appendChild(errDiv); }" />
         </div>`;
         
         return { isImage: true, isHTML: false, content: imageHtml };
@@ -2625,7 +3117,7 @@ function formatResponseContent(request, view) {
         
         const previewHtml = `<div class="response-preview-container">
             <div class="response-headers">${escapeHTML(headers)}</div>
-            <iframe class="response-preview-iframe" sandbox="allow-same-origin" srcdoc="${htmlContent}"></iframe>
+            <iframe class="response-preview-iframe" sandbox="" srcdoc="${htmlContent}"></iframe>
         </div>`;
         
         return { isImage: false, isHTML: true, isPreview: true, content: previewHtml };
@@ -3555,4 +4047,42 @@ function unescapeHTML(str) {
         .replace(/&gt;/g, ">")
         .replace(/&quot;/g, "\"")
         .replace(/&#039;/g, "'");
+}
+
+function isSafeHttpUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function safeUint8ArrayToBase64(uint8Array) {
+    if (!uint8Array) return '';
+    try {
+        let binary = '';
+        const chunkSize = 8192;
+        const len = uint8Array.length;
+        for (let i = 0; i < len; i += chunkSize) {
+            const chunk = uint8Array.subarray(i, i + chunkSize);
+            binary += String.fromCharCode.apply(null, chunk);
+        }
+        return btoa(binary);
+    } catch (e) {
+        console.error('Failed to encode Uint8Array to Base64:', e);
+        return '';
+    }
+}
+
+function safeStringToBase64(str) {
+    if (!str) return '';
+    try {
+        const bytes = new TextEncoder().encode(str);
+        return safeUint8ArrayToBase64(bytes);
+    } catch (e) {
+        console.error('Failed to encode string to Base64:', e);
+        return '';
+    }
 }
