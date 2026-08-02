@@ -1754,26 +1754,49 @@ themeToggleBtn.addEventListener('click', () => {
     toggleTheme();
 });
 
-document.querySelectorAll('.filter-checkbox input').forEach(checkbox => {
+document.querySelectorAll('.filter-checkbox input[data-type]').forEach(checkbox => {
     checkbox.addEventListener('change', () => {
         const type = checkbox.dataset.type;
+        if (!type) return;
         if (checkbox.checked) {
             hiddenTypes.add(type);
         } else {
             hiddenTypes.delete(type);
         }
         localStorage.setItem('hiddenTypes', JSON.stringify(Array.from(hiddenTypes)));
+        updateActiveFilterBadge();
         renderRequestList();
     });
 });
 
+// One-time version migration for DevTools panel
+try {
+    const currentManifestVersion = browser.runtime.getManifest().version;
+    const lastPanelVersion = localStorage.getItem('lastPanelVersion');
+
+    if (lastPanelVersion !== currentManifestVersion) {
+        console.log(`[Version Migration] Upgraded to v${currentManifestVersion} (previous: ${lastPanelVersion || 'none'}). Clearing legacy hiddenTypes.`);
+        localStorage.removeItem('hiddenTypes');
+        localStorage.setItem('lastPanelVersion', currentManifestVersion);
+        hiddenTypes.clear();
+    }
+} catch(e) {
+    console.warn('[Version Migration] Warning checking panel version migration:', e);
+}
+
 const savedHiddenTypes = localStorage.getItem('hiddenTypes');
 if (savedHiddenTypes) {
-    hiddenTypes = new Set(JSON.parse(savedHiddenTypes));
-    hiddenTypes.forEach(type => {
-        const checkbox = document.querySelector(`input[data-type="${type}"]`);
-        if (checkbox) checkbox.checked = true;
-    });
+    try {
+        const parsed = JSON.parse(savedHiddenTypes);
+        const validTypes = Array.isArray(parsed) ? parsed.filter(t => t && typeof t === 'string') : [];
+        hiddenTypes = new Set(validTypes);
+        hiddenTypes.forEach(type => {
+            const checkbox = document.querySelector(`input[data-type="${type}"]`);
+            if (checkbox) checkbox.checked = true;
+        });
+    } catch(e) {
+        localStorage.removeItem('hiddenTypes');
+    }
 }
 
 searchInput.addEventListener('input', () => {

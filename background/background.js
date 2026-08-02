@@ -658,6 +658,18 @@ browser.storage.local.get(['interceptSettings', 'captureEnabled', 'matchReplaceR
   console.error('Failed to load settings from storage:', err);
 });
 
+// Handle extension installation and version updates
+browser.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'update' || details.reason === 'install') {
+    const currentVer = browser.runtime.getManifest().version;
+    console.log(`[Extension Lifecycle] ${details.reason} to v${currentVer} (previous: ${details.previousVersion || 'N/A'})`);
+    try {
+      localStorage.removeItem('hiddenTypes');
+    } catch(e) {}
+    browser.storage.local.set({ lastMigratedVersion: currentVer });
+  }
+});
+
 browser.tabs.onActivated.addListener((activeInfo) => {
   activeTabId = activeInfo.tabId;
   updateIcon();
