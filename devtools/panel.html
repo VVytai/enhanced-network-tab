@@ -503,14 +503,14 @@
                 </div>
             </div>
             <div class="get-warning" style="margin-bottom: 15px;">
-                <p><strong>⚠️ Note:</strong> Headers and Body can be modified. Status code changes may not be supported by the browser API.</p>
+                <p><strong>⚠️ Note:</strong> Only headers and body can be modified. The browser API does not support changing the response status.</p>
             </div>
             <div class="intercept-editor">
                 <div class="editor-row">
                     <label>Status Code:</label>
-                    <input type="number" id="responseStatusCode" min="100" max="599">
+                    <input type="number" id="responseStatusCode" min="100" max="599" readonly class="response-status-readonly" title="Response status is read-only because the browser API cannot modify it." aria-label="Response status code (read-only)">
                     <label style="margin-left: 15px;">Status Text:</label>
-                    <input type="text" id="responseStatusText">
+                    <input type="text" id="responseStatusText" readonly class="response-status-readonly" title="Response status is read-only because the browser API cannot modify it." aria-label="Response status text (read-only)">
                 </div>
                 <div class="editor-row">
                     <label>Headers:</label>

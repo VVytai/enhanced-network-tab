@@ -16,12 +16,14 @@ let matchReplaceRules = [];
 let requests = new Map();
 let activeTabId = null;
 let devtoolsPorts = new Map();
+let devtoolsPortCounter = 0;
 let inspectedTabs = new Set(); // Track tabs that have DevTools open
 let pendingRequests = new Map();
 let pendingResponses = new Map();
 let requestIdCounter = 0;
 let requestIdMap = new Map();
 let interceptedRequestIds = new Set();
+let interceptedResponseTabIds = new Map();
 let pendingUrlModifications = new Map();
 let pendingHeaderModifications = new Map();
 let pendingResponseHeaderIntercepts = new Map();
@@ -985,6 +987,7 @@ browser.webRequest.onBeforeRequest.addListener(
       
       if (interceptSettings.interceptResponses) {
         interceptedRequestIds.add(details.requestId);
+        interceptedResponseTabIds.set(details.requestId, details.tabId);
       }
       
       requests.set(requestId, requestData);
@@ -1310,6 +1313,7 @@ browser.webRequest.onHeadersReceived.addListener(
             
             pendingResponses.set(details.requestId, responseInterceptData);
             interceptedRequestIds.delete(details.requestId);
+            interceptedResponseTabIds.delete(details.requestId);
             
             notifyDevTools({
               type: 'interceptResponse',
@@ -1596,8 +1600,10 @@ browser.webRequest.onErrorOccurred.addListener(
 
 browser.runtime.onConnect.addListener((port) => {
   if (port.name === 'devtools-panel') {
-    const tabId = port.sender?.tab?.id || 'devtools';
-    devtoolsPorts.set(tabId, port);
+    // DevTools pages do not reliably expose sender.tab. Give every panel its own
+    // key so opening a second panel cannot replace the first one's port.
+    const portId = `devtools_${++devtoolsPortCounter}`;
+    devtoolsPorts.set(portId, port);
     
     port.postMessage({
       type: 'initialState',
@@ -1614,10 +1620,18 @@ browser.runtime.onConnect.addListener((port) => {
     });
     
     port.onDisconnect.addListener(() => {
-      devtoolsPorts.delete(tabId);
+      devtoolsPorts.delete(portId);
       // Clean up inspected tab when DevTools closes
       if (port.inspectedTabId) {
-        inspectedTabs.delete(port.inspectedTabId);
+        const anotherPanelIsOpen = Array.from(devtoolsPorts.values())
+          .some(otherPort => otherPort.inspectedTabId === port.inspectedTabId);
+
+        if (!anotherPanelIsOpen) {
+          inspectedTabs.delete(port.inspectedTabId);
+          // Never leave network requests paused after their controlling DevTools
+          // panel has been closed.
+          releasePendingInterceptions(port.inspectedTabId);
+        }
       }
     });
   }
@@ -1728,7 +1742,7 @@ function handleDevToolsMessage(msg, port) {
       break;
       
     case 'disableIntercept':
-      handleDisableIntercept(msg.currentRequestId, msg.currentType);
+      handleDisableIntercept();
       break;
   }
 }
@@ -2108,62 +2122,65 @@ function handleDropResponse(requestId) {
   }
 }
 
-function handleDisableIntercept(currentRequestId, currentType) {
-  interceptEnabled = false;
-  
-  if (currentType === 'request') {
-    let currentOriginalRequestId = null;
-    let currentPending = null;
-    
-    for (const [key, value] of pendingRequests.entries()) {
-      if (value.id === currentRequestId) {
-        currentOriginalRequestId = key;
-        currentPending = value;
-        break;
-      }
-    }
-    
-    if (currentPending && currentPending.resolve) {
-      currentPending.resolve({});
-      pendingRequests.delete(currentOriginalRequestId);
-    }
-  } else if (currentType === 'response') {
-    let currentOriginalRequestId = null;
-    let currentPending = null;
-    
-    for (const [key, value] of pendingResponses.entries()) {
-      if (value.requestId === currentRequestId) {
-        currentOriginalRequestId = key;
-        currentPending = value;
-        break;
-      }
-    }
-    
-    if (currentPending && currentPending.filter) {
-      const originalData = new TextEncoder().encode(currentPending.responseBody);
-      currentPending.filter.write(originalData);
-      currentPending.filter.close();
-      pendingResponses.delete(currentOriginalRequestId);
+function getOriginalResponseData(responseData) {
+  if (!responseData.isBase64) {
+    return new TextEncoder().encode(responseData.responseBody);
+  }
+
+  const binaryString = atob(responseData.responseBody);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let index = 0; index < binaryString.length; index++) {
+    bytes[index] = binaryString.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function releasePendingInterceptions(tabId = null) {
+  const belongsToTab = pendingData => tabId === null ||
+    pendingData?.tabId === tabId || pendingData?.request?.tabId === tabId;
+
+  for (const [originalRequestId, pendingData] of pendingRequests.entries()) {
+    if (belongsToTab(pendingData)) {
+      pendingData.resolve?.({});
+      pendingRequests.delete(originalRequestId);
     }
   }
-  
-  for (const [requestId, pendingData] of pendingRequests.entries()) {
-    if (pendingData.resolve) {
-      pendingData.resolve({});
+
+  // Response interception starts by pausing at onHeadersReceived. These
+  // Promises must be resolved separately; they are not stored in
+  // pendingResponses until after the body arrives.
+  for (const [requestId, pendingData] of pendingResponseHeaderIntercepts.entries()) {
+    if (belongsToTab(pendingData)) {
+      pendingData.resolve?.({});
+      pendingResponseHeaderIntercepts.delete(requestId);
     }
   }
-  pendingRequests.clear();
-  
-  for (const [requestId, responseData] of pendingResponses.entries()) {
-    if (responseData.filter) {
-      const originalData = new TextEncoder().encode(responseData.responseBody);
-      responseData.filter.write(originalData);
+
+  for (const [originalRequestId, responseData] of pendingResponses.entries()) {
+    if (!belongsToTab(responseData)) continue;
+
+    try {
+      responseData.filter.write(getOriginalResponseData(responseData));
       responseData.filter.close();
+    } catch (error) {
+      console.error('Failed to release intercepted response:', error);
+      try { responseData.filter.close(); } catch (_) {}
+    }
+    pendingResponses.delete(originalRequestId);
+  }
+
+  for (const originalRequestId of interceptedRequestIds) {
+    const interceptedTabId = interceptedResponseTabIds.get(originalRequestId);
+    if (tabId === null || interceptedTabId === tabId) {
+      interceptedRequestIds.delete(originalRequestId);
+      interceptedResponseTabIds.delete(originalRequestId);
     }
   }
-  pendingResponses.clear();
-  
-  interceptedRequestIds.clear();
+}
+
+function handleDisableIntercept() {
+  interceptEnabled = false;
+  releasePendingInterceptions();
   
   updateIcon();
   notifyDevTools({ 

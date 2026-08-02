@@ -807,6 +807,12 @@ mark {
     color: var(--text-primary);
 }
 
+.response-status-readonly {
+    background: var(--bg-secondary) !important;
+    color: var(--text-secondary) !important;
+    cursor: help;
+}
+
 .modal-actions {
     display: flex;
     justify-content: space-between;
