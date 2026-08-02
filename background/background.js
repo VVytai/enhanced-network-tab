@@ -415,7 +415,7 @@ const LibraryScanner = {
             if (this.isVersionVulnerable(version, vuln)) {
                 vulns.push({
                     severity: vuln.severity || 'unknown',
-                    summary: vuln.identifiers?.summary || 'Unknown vulnerability',
+                    summary: vuln.summary || vuln.identifiers?.summary || 'Unknown vulnerability',
                     cve: vuln.identifiers?.CVE || [],
                     cwe: vuln.cwe || [],
                     info: vuln.info || [],
