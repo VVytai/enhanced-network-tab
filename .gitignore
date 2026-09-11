@@ -1,7 +1,11 @@
-.DS_Store
+# macOS metadata in all directories
+**/.DS_Store
 node_modules/
 dist/
 coverage/
 .web-ext-artifacts/
 *.zip
-/tests/firefox-test-app/
+/tests/
+/docs/
+*.md
+!/README.md

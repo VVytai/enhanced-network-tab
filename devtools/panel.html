@@ -1,720 +1,1628 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head>
-    <meta charset="utf-8">
-    <title>xy Panel</title>
-    <link rel="stylesheet" href="panel.css">
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="controls">
-                <label class="toggle-switch">
-                    <input type="checkbox" id="captureToggle">
-                    <span class="slider"></span>
-                    <span class="label">Capture</span>
-                </label>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="interceptToggle">
-                    <span class="slider intercept"></span>
-                    <span class="label">Intercept</span>
-                </label>
-                <button id="interceptSettingsBtn" class="btn">Intercept Settings</button>
-                <button id="clearBtn" class="btn">Clear</button>
-                <button id="decoderBtn" class="btn">Decoder</button>
-                <button id="securityBtn" class="btn security-btn">
-                    <span>Automated Scanner</span>
-                    <span id="securityBadge" class="security-badge" style="display: none;">0</span>
-                </button>
-                <button id="filterBtn" class="btn">
-                    Filters ▼
-                    <span id="activeFilterBadge" class="active-filter-badge" style="display: none;">0</span>
-                </button>
-                <button id="themeToggleBtn" class="theme-toggle-btn" title="Toggle theme">
-                    <span class="theme-icon">🌙</span>
-                </button>
-                <button id="highlightRulesBtn" class="btn icon-btn" title="Highlighting Rules">
-                    <span>🎨</span>
-                </button>
-                <button id="matchReplaceBtn" class="btn icon-btn" title="Match & Replace">
-                    <span>⇄</span>
-                </button>
-            </div>
-            <div class="search-container">
-                <input type="text" id="searchInput" placeholder="Search requests...">
-            </div>
-        </div>
-        
-        <div class="filter-panel" id="filterPanel" style="display: none;">
-            <!-- Presets & Quick Controls -->
-            <div class="filter-presets-bar">
-                <span class="filter-presets-label">⚡ Presets:</span>
-                <button class="btn btn-sm filter-preset-btn" data-preset="xhr">XHR / Fetch Only</button>
-                <button class="btn btn-sm filter-preset-btn" data-preset="failed">Failed Requests Only</button>
-                <button class="btn btn-sm filter-preset-btn" data-preset="mutating">Data Mutating Only</button>
-                <button class="btn btn-sm filter-preset-btn" data-preset="all">Show All</button>
-                <button class="btn btn-sm filter-reset-btn" id="resetAllFiltersBtn">Reset All Filters</button>
-            </div>
-
-            <!-- Filter Grid -->
-            <div class="filter-grid">
-                <!-- Hide Resource Types -->
-                <div class="filter-section">
-                    <label class="filter-label">Hide resource types:</label>
-                    <div class="filter-options">
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-image" data-type="image">
-                            <span>Images</span>
-                        </label>
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-script" data-type="script">
-                            <span>JS Files</span>
-                        </label>
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-stylesheet" data-type="stylesheet">
-                            <span>CSS Files</span>
-                        </label>
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-font" data-type="font">
-                            <span>Fonts</span>
-                        </label>
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-media" data-type="media">
-                            <span>Media</span>
-                        </label>
-                        <label class="filter-checkbox">
-                            <input type="checkbox" id="filter-websocket" data-type="websocket">
-                            <span>WebSocket</span>
-                        </label>
-                        <label class="filter-checkbox filter-security-only-checkbox">
-                            <input type="checkbox" id="filter-security-only">
-                            <span>🛡️ Has Security Findings Only</span>
-                        </label>
-                    </div>
-                </div>
-
-                <!-- HTTP Methods Filter -->
-                <div class="filter-section">
-                    <label class="filter-label">HTTP Methods:</label>
-                    <div class="filter-options" id="methodFilterOptions">
-                        <label class="filter-checkbox"><input type="checkbox" data-method="GET" checked><span>GET</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="POST" checked><span>POST</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="PUT" checked><span>PUT</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="DELETE" checked><span>DELETE</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="PATCH" checked><span>PATCH</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="OPTIONS" checked><span>OPTIONS</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-method="HEAD" checked><span>HEAD</span></label>
-                    </div>
-                </div>
-
-                <!-- Status Codes Filter -->
-                <div class="filter-section">
-                    <label class="filter-label">Status Codes:</label>
-                    <div class="filter-options" id="statusFilterOptions">
-                        <label class="filter-checkbox"><input type="checkbox" data-status="2xx" checked><span>2xx Success</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-status="3xx" checked><span>3xx Redirection</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-status="4xx" checked><span>4xx Client Error</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-status="5xx" checked><span>5xx Server Error</span></label>
-                        <label class="filter-checkbox"><input type="checkbox" data-status="0" checked><span>Status 0 / Failed</span></label>
-                    </div>
-                </div>
-
-                <!-- Domain Filter with Live Search -->
-                <div class="filter-section filter-domain-section">
-                    <label class="filter-label">Target Domains:</label>
-                    <div class="domain-filter-container">
-                        <div class="domain-search-wrapper">
-                            <input type="text" id="domainSearchInput" placeholder="Search domains..." class="domain-search-input">
-                            <button class="btn btn-sm" id="domainSelectAllBtn">Select All</button>
-                            <button class="btn btn-sm" id="domainClearAllBtn">Clear</button>
-                        </div>
-                        <div class="domain-list" id="domainFilterList">
-                            <div class="domain-empty-hint">No domains captured yet</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="main-content">
-            <div class="request-list-container">
-                <table id="requestTable">
-                    <thead>
-                        <tr>
-                            <th data-column="number">#<div class="column-resizer"></div></th>
-                            <th data-column="method">Method<div class="column-resizer"></div></th>
-                            <th data-column="host">Host<div class="column-resizer"></div></th>
-                            <th data-column="url">URL<div class="column-resizer"></div></th>
-                            <th data-column="status">Status<div class="column-resizer"></div></th>
-                            <th data-column="reqSize">Req Size<div class="column-resizer"></div></th>
-                            <th data-column="resSize">Res Size<div class="column-resizer"></div></th>
-                            <th data-column="type">Type</th>
-                        </tr>
-                    </thead>
-                    <tbody id="requestList"></tbody>
-                </table>
-            </div>
-            
-            <div class="request-details">
-                <div class="tabs">
-                    <button class="tab-btn active" data-tab="request">Request</button>
-                    <button class="tab-btn" data-tab="modified" style="display:none;">Modified Request</button>
-                    <button class="tab-btn" data-tab="response">Response</button>
-                    <button class="tab-btn" data-tab="security" id="securityTabBtn" style="display:none;">
-                        Security
-                        <span id="securityTabBadge" class="security-tab-badge" style="display: none;">0</span>
+    <head>
+        <meta charset="utf-8" />
+        <title>xy Panel</title>
+        <link rel="stylesheet" href="panel.css" />
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <div class="controls">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="captureToggle" />
+                        <span class="slider"></span>
+                        <span class="label">Capture</span>
+                    </label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="interceptToggle" />
+                        <span class="slider intercept"></span>
+                        <span class="label">Intercept</span>
+                    </label>
+                    <button id="interceptSettingsBtn" class="btn">
+                        Intercept Settings
+                    </button>
+                    <button id="clearBtn" class="btn">Clear</button>
+                    <button id="decoderBtn" class="btn">Decoder</button>
+                    <button id="securityBtn" class="btn security-btn">
+                        <span>Automated Scanner</span>
+                        <span
+                            id="securityBadge"
+                            class="security-badge"
+                            style="display: none"
+                            >0</span
+                        >
+                    </button>
+                    <button id="filterBtn" class="btn">
+                        Filters ▼
+                        <span
+                            id="activeFilterBadge"
+                            class="active-filter-badge"
+                            style="display: none"
+                            >0</span
+                        >
+                    </button>
+                    <button
+                        id="themeToggleBtn"
+                        class="theme-toggle-btn"
+                        title="Toggle theme"
+                    >
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                    <button
+                        id="highlightRulesBtn"
+                        class="btn icon-btn"
+                        title="Highlighting Rules"
+                    >
+                        <span>🎨</span>
+                    </button>
+                    <button
+                        id="matchReplaceBtn"
+                        class="btn icon-btn"
+                        title="Match & Replace"
+                    >
+                        <span>⇄</span>
                     </button>
                 </div>
-                
-                <div class="tab-content" id="requestTab">
-                    <div class="view-toggle">
-                        <button class="view-btn active" data-view="raw">Raw</button>
-                        <button class="view-btn" data-view="formatted">Formatted</button>
-                        <button class="copy-curl-btn" id="copyCurlBtn">Copy as cURL</button>
-                        <button class="repeater-btn" id="repeaterBtn">Send to Repeater</button>
-                        <button class="decoder-btn" id="sendToDecoderBtn">Send to Decoder</button>
-                        <button class="copy-content-btn" id="copyRequestBtn">Copy</button>
-                        <div class="content-search">
-                            <input type="text" id="requestSearchInput" placeholder="Search in request..." class="content-search-input">
-                            <span id="requestSearchCount" class="search-count"></span>
+                <div class="search-container">
+                    <input
+                        type="text"
+                        id="searchInput"
+                        placeholder="Search requests..."
+                    />
+                </div>
+            </div>
+
+            <div
+                class="experimental-promotion"
+                id="experimentalPromotionBanner"
+                hidden
+            >
+                <div class="experimental-promotion-copy">
+                    <strong
+                        >New: Send edited method/body requests
+                        immediately</strong
+                    >
+                    <span
+                        >The experimental mode cancels the page request and
+                        sends your edited copy from the extension. The page will
+                        not receive its response.</span
+                    >
+                </div>
+                <div class="experimental-promotion-actions">
+                    <button
+                        class="btn btn-primary"
+                        id="openExperimentalSettingsBtn"
+                    >
+                        Review in Settings
+                    </button>
+                    <button class="btn" id="dismissExperimentalPromotionBtn">
+                        Dismiss
+                    </button>
+                </div>
+            </div>
+
+            <div class="filter-panel" id="filterPanel" style="display: none">
+                <!-- Presets & Quick Controls -->
+                <div class="filter-presets-bar">
+                    <span class="filter-presets-label">⚡ Presets:</span>
+                    <button
+                        class="btn btn-sm filter-preset-btn"
+                        data-preset="xhr"
+                    >
+                        XHR / Fetch Only
+                    </button>
+                    <button
+                        class="btn btn-sm filter-preset-btn"
+                        data-preset="failed"
+                    >
+                        Failed Requests Only
+                    </button>
+                    <button
+                        class="btn btn-sm filter-preset-btn"
+                        data-preset="mutating"
+                    >
+                        Data Mutating Only
+                    </button>
+                    <button
+                        class="btn btn-sm filter-preset-btn"
+                        data-preset="all"
+                    >
+                        Show All
+                    </button>
+                    <button
+                        class="btn btn-sm filter-reset-btn"
+                        id="resetAllFiltersBtn"
+                    >
+                        Reset All Filters
+                    </button>
+                </div>
+
+                <!-- Filter Grid -->
+                <div class="filter-grid">
+                    <!-- Hide Resource Types -->
+                    <div class="filter-section">
+                        <label class="filter-label">Hide resource types:</label>
+                        <div class="filter-options">
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-image"
+                                    data-type="image"
+                                />
+                                <span>Images</span>
+                            </label>
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-script"
+                                    data-type="script"
+                                />
+                                <span>JS Files</span>
+                            </label>
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-stylesheet"
+                                    data-type="stylesheet"
+                                />
+                                <span>CSS Files</span>
+                            </label>
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-font"
+                                    data-type="font"
+                                />
+                                <span>Fonts</span>
+                            </label>
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-media"
+                                    data-type="media"
+                                />
+                                <span>Media</span>
+                            </label>
+                            <label class="filter-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="filter-websocket"
+                                    data-type="websocket"
+                                />
+                                <span>WebSocket</span>
+                            </label>
+                            <label
+                                class="filter-checkbox filter-security-only-checkbox"
+                            >
+                                <input
+                                    type="checkbox"
+                                    id="filter-security-only"
+                                />
+                                <span>🛡️ Has Security Findings Only</span>
+                            </label>
                         </div>
                     </div>
-                    <div class="content-area">
-                        <pre id="requestContent"></pre>
-                    </div>
-                </div>
-                
-                <div class="tab-content" id="modifiedTab" style="display:none;">
-                    <div class="view-toggle">
-                        <button class="view-btn active" data-view="raw">Raw</button>
-                        <button class="view-btn" data-view="formatted">Formatted</button>
-                        <button class="copy-curl-btn" id="copyModifiedCurlBtn">Copy as cURL</button>
-                        <button class="repeater-btn" id="modifiedRepeaterBtn">Send to Repeater</button>
-                        <button class="decoder-btn" id="modifiedSendToDecoderBtn">Send to Decoder</button>
-                        <div class="content-search">
-                            <input type="text" id="modifiedSearchInput" placeholder="Search in modified request..." class="content-search-input">
-                            <span id="modifiedSearchCount" class="search-count"></span>
+
+                    <!-- HTTP Methods Filter -->
+                    <div class="filter-section">
+                        <label class="filter-label">HTTP Methods:</label>
+                        <div class="filter-options" id="methodFilterOptions">
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="GET"
+                                    checked
+                                /><span>GET</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="POST"
+                                    checked
+                                /><span>POST</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="PUT"
+                                    checked
+                                /><span>PUT</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="DELETE"
+                                    checked
+                                /><span>DELETE</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="PATCH"
+                                    checked
+                                /><span>PATCH</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="OPTIONS"
+                                    checked
+                                /><span>OPTIONS</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-method="HEAD"
+                                    checked
+                                /><span>HEAD</span></label
+                            >
                         </div>
                     </div>
-                    <div class="content-area">
-                        <pre id="modifiedContent"></pre>
-                    </div>
-                </div>
-                
-                <div class="tab-content" id="responseTab" style="display:none;">
-                    <div class="view-toggle">
-                        <button class="view-btn active" data-view="raw">Raw</button>
-                        <button class="view-btn" data-view="formatted">Formatted</button>
-                        <button class="view-btn" data-view="preview" id="responsePreviewBtn" style="display:none;">Preview</button>
-                        <button class="copy-content-btn" id="copyResponseBtn">Copy</button>
-                        <div class="content-search">
-                            <input type="text" id="responseSearchInput" placeholder="Search in response..." class="content-search-input">
-                            <span id="responseSearchCount" class="search-count"></span>
+
+                    <!-- Status Codes Filter -->
+                    <div class="filter-section">
+                        <label class="filter-label">Status Codes:</label>
+                        <div class="filter-options" id="statusFilterOptions">
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-status="2xx"
+                                    checked
+                                /><span>2xx Success</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-status="3xx"
+                                    checked
+                                /><span>3xx Redirection</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-status="4xx"
+                                    checked
+                                /><span>4xx Client Error</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-status="5xx"
+                                    checked
+                                /><span>5xx Server Error</span></label
+                            >
+                            <label class="filter-checkbox"
+                                ><input
+                                    type="checkbox"
+                                    data-status="0"
+                                    checked
+                                /><span>Status 0 / Failed</span></label
+                            >
                         </div>
                     </div>
-                    <div class="content-area">
-                        <pre id="responseContent"></pre>
-                    </div>
-                </div>
-                
-                <div class="tab-content" id="securityTab" style="display:none;">
-                    <div class="view-toggle">
-                        <span class="security-tab-title">Security Findings for Selected Request</span>
-                        <button class="btn" id="exportSecurityFindingsBtn">Export JSON</button>
-                    </div>
-                    <div class="content-area security-content-area">
-                        <div id="securityTabContent" class="security-findings-container">
-                            <div class="security-no-findings">
-                                <p>No security findings for this request.</p>
+
+                    <!-- Domain Filter with Live Search -->
+                    <div class="filter-section filter-domain-section">
+                        <label class="filter-label">Target Domains:</label>
+                        <div class="domain-filter-container">
+                            <div class="domain-search-wrapper">
+                                <input
+                                    type="text"
+                                    id="domainSearchInput"
+                                    placeholder="Search domains..."
+                                    class="domain-search-input"
+                                />
+                                <button
+                                    class="btn btn-sm"
+                                    id="domainSelectAllBtn"
+                                >
+                                    Select All
+                                </button>
+                                <button
+                                    class="btn btn-sm"
+                                    id="domainClearAllBtn"
+                                >
+                                    Clear
+                                </button>
+                            </div>
+                            <div class="domain-list" id="domainFilterList">
+                                <div class="domain-empty-hint">
+                                    No domains captured yet
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
-    
-    <div id="highlightRulesModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Highlighting Rules</h2>
-                <button class="close-btn" id="closeHighlightRulesBtn">&times;</button>
-            </div>
-            <div class="settings-container">
-                <div class="setting-section">
-                    <p class="setting-description">Define rules to highlight requests based on URL patterns.</p>
-                    <div class="rules-list" id="highlightRulesList">
-                        <!-- Rules will be added here -->
+
+            <div class="main-content">
+                <div class="request-list-container">
+                    <table id="requestTable">
+                        <thead>
+                            <tr>
+                                <th data-column="number">
+                                    #
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="method">
+                                    Method
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="host">
+                                    Host
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="url">
+                                    URL
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="status">
+                                    Status
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="reqSize">
+                                    Req Size
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="resSize">
+                                    Res Size
+                                    <div class="column-resizer"></div>
+                                </th>
+                                <th data-column="type">Type</th>
+                            </tr>
+                        </thead>
+                        <tbody id="requestList"></tbody>
+                    </table>
+                </div>
+
+                <div class="request-details">
+                    <div class="tabs">
+                        <button class="tab-btn active" data-tab="request">
+                            Request
+                        </button>
+                        <button
+                            class="tab-btn"
+                            data-tab="modified"
+                            style="display: none"
+                        >
+                            Modified Request
+                        </button>
+                        <button class="tab-btn" data-tab="response">
+                            Response
+                        </button>
+                        <button
+                            class="tab-btn"
+                            data-tab="security"
+                            id="securityTabBtn"
+                            style="display: none"
+                        >
+                            Security
+                            <span
+                                id="securityTabBadge"
+                                class="security-tab-badge"
+                                style="display: none"
+                                >0</span
+                            >
+                        </button>
                     </div>
-                    <div class="add-rule-form">
-                        <input type="text" id="newRulePattern" placeholder="Pattern (e.g. /api/v1)">
-                        <select id="newRuleType" class="rule-type-select">
-                            <option value="regex">Regex</option>
-                            <option value="contains">Contains</option>
-                            <option value="starts_with">Starts With</option>
-                            <option value="ends_with">Ends With</option>
-                            <option value="exact">Exact Match</option>
-                        </select>
-                        <input type="color" id="newRuleColor" value="#ffeb3b">
-                        <button class="btn btn-primary" id="addHighlightRuleBtn">Add Rule</button>
-                    </div>
-                </div>
-                <div class="settings-actions">
-                    <button class="btn btn-danger" id="clearHighlightRulesBtn" style="margin-right: 10px;">Clear All</button>
-                    <button class="btn btn-primary" id="saveHighlightRulesBtn">Save Rules</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="interceptModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Intercepted Request <span id="interceptQueueCount" class="queue-count"></span></h2>
-                <div class="content-search">
-                    <input type="text" id="interceptSearchInput" placeholder="Search..." class="content-search-input">
-                    <span id="interceptSearchCount" class="search-count"></span>
-                </div>
-            </div>
-            <div class="get-warning" style="margin-bottom: 15px;" id="interceptWarning">
-                <p><strong>Note:</strong> Header modifications are applied natively. URL or Body modifications MAY require cancelling and resending the request, which means the original page might not receive the response (except for main frame navigations).</p>
-            </div>
-            <div class="intercept-editor">
-                <div class="editor-row">
-                    <label>Method:</label>
-                    <select id="interceptMethod">
-                        <option>GET</option>
-                        <option>POST</option>
-                        <option>PUT</option>
-                        <option>PATCH</option>
-                        <option>DELETE</option>
-                        <option>HEAD</option>
-                        <option>OPTIONS</option>
-                    </select>
-                </div>
-                <div class="editor-row">
-                    <label>URL:</label>
-                    <input type="text" id="interceptUrl">
-                </div>
-                <div class="editor-row">
-                    <label>Headers:</label>
-                    <textarea id="interceptHeaders" rows="8"></textarea>
-                </div>
-                <div class="editor-row">
-                    <label>Body:</label>
-                    <textarea id="interceptBody" rows="10"></textarea>
-                </div>
-            </div>
-            <div class="modal-actions">
-                <button class="btn disable-intercept-btn" id="disableInterceptBtn">Disable Intercept</button>
-                <div class="primary-actions">
-                    <button class="btn btn-primary" id="forwardBtn">Forward</button>
-                    <button class="btn btn-danger" id="dropBtn">Drop</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="repeaterModal" class="modal">
-        <div class="modal-content repeater-modal">
-            <div class="modal-header">
-                <h2>Request Repeater</h2>
-                <button class="close-btn" id="closeRepeaterBtn">&times;</button>
-            </div>
-            <div class="repeater-container">
-                <div class="repeater-content-wrapper">
-                    <div class="repeater-request">
-                        <div class="section-header">
-                            <h3>Request</h3>
+
+                    <div class="tab-content" id="requestTab">
+                        <div class="view-toggle">
+                            <button class="view-btn active" data-view="raw">
+                                Raw
+                            </button>
+                            <button class="view-btn" data-view="formatted">
+                                Formatted
+                            </button>
+                            <button class="copy-curl-btn" id="copyCurlBtn">
+                                Copy as cURL
+                            </button>
+                            <button class="repeater-btn" id="repeaterBtn">
+                                Send to Repeater
+                            </button>
+                            <button class="decoder-btn" id="sendToDecoderBtn">
+                                Send to Decoder
+                            </button>
+                            <button
+                                class="copy-content-btn"
+                                id="copyRequestBtn"
+                            >
+                                Copy
+                            </button>
                             <div class="content-search">
-                                <input type="text" id="repeaterRequestSearchInput" placeholder="Search..." class="content-search-input">
-                                <span id="repeaterRequestSearchCount" class="search-count"></span>
+                                <input
+                                    type="text"
+                                    id="requestSearchInput"
+                                    placeholder="Search in request..."
+                                    class="content-search-input"
+                                />
+                                <span
+                                    id="requestSearchCount"
+                                    class="search-count"
+                                ></span>
                             </div>
                         </div>
-                        <div class="editor-row">
-                            <label>Method:</label>
-                            <select id="repeaterMethod">
-                                <option>GET</option>
-                                <option>POST</option>
-                                <option>PUT</option>
-                                <option>PATCH</option>
-                                <option>DELETE</option>
-                                <option>HEAD</option>
-                                <option>OPTIONS</option>
-                            </select>
-                            <label style="margin-left: 15px;">URL:</label>
-                            <input type="text" id="repeaterUrl" style="flex: 1;">
-                        </div>
-                        <div class="editor-row">
-                            <label>Headers:</label>
-                            <textarea id="repeaterHeaders" rows="6"></textarea>
-                        </div>
-                        <div class="editor-row">
-                            <label>Body:</label>
-                            <textarea id="repeaterBody" rows="8"></textarea>
-                        </div>
-                        <div class="repeater-actions">
-                            <button class="btn btn-primary" id="sendRepeaterBtn">Send Request</button>
-                            <button class="btn" id="clearRepeaterBtn">Clear Response</button>
+                        <div class="content-area">
+                            <pre id="requestContent"></pre>
                         </div>
                     </div>
-                    <div class="repeater-response">
-                        <div class="section-header">
-                            <h3>Response</h3>
+
+                    <div
+                        class="tab-content"
+                        id="modifiedTab"
+                        style="display: none"
+                    >
+                        <div class="view-toggle">
+                            <button class="view-btn active" data-view="raw">
+                                Raw
+                            </button>
+                            <button class="view-btn" data-view="formatted">
+                                Formatted
+                            </button>
+                            <button
+                                class="copy-curl-btn"
+                                id="copyModifiedCurlBtn"
+                            >
+                                Copy as cURL
+                            </button>
+                            <button
+                                class="repeater-btn"
+                                id="modifiedRepeaterBtn"
+                            >
+                                Send to Repeater
+                            </button>
+                            <button
+                                class="decoder-btn"
+                                id="modifiedSendToDecoderBtn"
+                            >
+                                Send to Decoder
+                            </button>
                             <div class="content-search">
-                                <input type="text" id="repeaterResponseSearchInput" placeholder="Search..." class="content-search-input">
-                                <span id="repeaterResponseSearchCount" class="search-count"></span>
+                                <input
+                                    type="text"
+                                    id="modifiedSearchInput"
+                                    placeholder="Search in modified request..."
+                                    class="content-search-input"
+                                />
+                                <span
+                                    id="modifiedSearchCount"
+                                    class="search-count"
+                                ></span>
                             </div>
                         </div>
-                        <div class="response-status" id="repeaterStatus">No response yet</div>
-                        <div class="response-tabs">
-                            <button class="response-tab-btn active" data-tab="headers">Headers</button>
-                            <button class="response-tab-btn" data-tab="body">Body</button>
-                            <button class="response-tab-btn" data-tab="raw">Raw</button>
-                        </div>
-                        <div class="response-content">
-                            <pre id="repeaterResponseContent"></pre>
+                        <div class="content-area">
+                            <pre id="modifiedContent"></pre>
                         </div>
                     </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="interceptSettingsModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Intercept Settings</h2>
-                <button class="close-btn" id="closeInterceptSettingsBtn">&times;</button>
-            </div>
-            <div class="settings-container">
-                <div class="setting-section">
-                    <h3>Scope Control</h3>
-                    <label class="method-checkbox">
-                        <input type="checkbox" id="enableScope">
-                        <span>Enable Scope Control (Global Filter)</span>
-                    </label>
-                    <p class="setting-description">Requests outside of scope are completely ignored by the extension (not logged or intercepted).</p>
-                    
-                    <p class="setting-description" style="margin-top: 10px;"><strong>Include Patterns</strong> (whitelist - regex, one per line):</p>
-                    <textarea id="scopePatterns" rows="3" placeholder="Example: .*\\.example\\.com.*&#10;.*\\/api\\/v1\\/.*"></textarea>
-                    
-                    <p class="setting-description" style="margin-top: 10px;"><strong>Exclude Patterns</strong> (blacklist - regex, one per line):</p>
-                    <textarea id="scopeExcludePatterns" rows="3" placeholder="Example: .*\\/analytics\\/.*&#10;.*\\/ads\\/.*"></textarea>
-                </div>
 
-                <div class="setting-section">
-                    <h3>HTTP Methods to Intercept</h3>
-                    <div class="method-checkboxes">
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptGET" data-method="GET">
-                            <span>GET</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptPOST" data-method="POST" checked>
-                            <span>POST</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptPUT" data-method="PUT" checked>
-                            <span>PUT</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptPATCH" data-method="PATCH" checked>
-                            <span>PATCH</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptDELETE" data-method="DELETE" checked>
-                            <span>DELETE</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptHEAD" data-method="HEAD">
-                            <span>HEAD</span>
-                        </label>
-                        <label class="method-checkbox">
-                            <input type="checkbox" id="interceptOPTIONS" data-method="OPTIONS">
-                            <span>OPTIONS</span>
-                        </label>
-                    </div>
-                    <div class="get-warning" id="getWarning" style="display: none;">
-                        <p><strong>⚠️ Warning:</strong> Intercepting GET requests can significantly impact browsing performance as it will block all navigation, images, scripts, and other resources.</p>
-                    </div>
-                </div>
-                
-                <div class="setting-section">
-                    <h3>URL Patterns to Include (Intercept)</h3>
-                    <p class="setting-description">Only intercept requests matching these regex patterns. (Note: Requests must first pass Scope Control).</p>
-                    <textarea id="includePatterns" rows="3" placeholder="Example: api\\.example\\.com.*&#10;.*\\/api\\/.*"></textarea>
-                </div>
-                
-                <div class="setting-section">
-                    <h3>URL Patterns to Exclude (Intercept)</h3>
-                    <p class="setting-description">Never intercept requests matching these regex patterns (even if they are in scope).</p>
-                    <textarea id="excludePatterns" rows="3" placeholder="Example: .*\\.(js|css|png|jpg|gif)$&#10;.*\\/static\\/.*"></textarea>
-                </div>
-                
-                <div class="setting-section">
-                    <h3>File Extensions to Exclude</h3>
-                    <p class="setting-description">Never intercept requests for these file types (comma-separated):</p>
-                    <input type="text" id="excludeExtensions" placeholder="css, js, png, jpg, jpeg, gif, ico, svg, woff, woff2, ttf, eot">
-                </div>
-                
-                <div class="setting-section">
-                    <h3>Response Interception</h3>
-                    <label class="method-checkbox">
-                        <input type="checkbox" id="interceptResponses">
-                        <span>Intercept and allow modification of responses</span>
-                    </label>
-                    <div class="response-warning" id="responseWarning" style="display: none;">
-                        <p><strong>⚠️ Warning:</strong> Response interception will pause all responses for intercepted requests until you manually forward or drop them. This can significantly impact browsing experience.</p>
-                    </div>
-                </div>
-
-                <div class="setting-section">
-                    <h3>Early Interception</h3>
-                    <label class="method-checkbox">
-                        <input type="checkbox" id="useEarlyInterception">
-                        <span>Use onBeforeRequest (Early Interception)</span>
-                    </label>
-                    <div class="get-warning" id="earlyInterceptionWarning" style="display: none;">
-                        <p><strong>⚠️ Warning:</strong> This enables two-stage interception:</p>
-                        <ul style="margin: 8px 0 0 20px; padding-left: 0;">
-                            <li><strong>Stage 1 :</strong> Modify URL, Method, and Body. Headers are not available yet.</li>
-                            <li><strong>Stage 2 :</strong> Modify Headers, or change URL/Method/Body (will cancel and resend the request).</li>
-                        </ul>
-                        <p style="margin-top: 8px;">Without early interception, only Stage 2 is available.</p>
-                    </div>
-                </div>
-                
-                <div class="settings-actions">
-                    <button class="btn btn-primary" id="saveInterceptSettingsBtn">Save Settings</button>
-                    <button class="btn" id="resetInterceptSettingsBtn">Reset to Default</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="responseInterceptModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Intercepted Response <span id="responseQueueCount" class="queue-count"></span></h2>
-                <div class="content-search">
-                    <input type="text" id="responseInterceptSearchInput" placeholder="Search..." class="content-search-input">
-                    <span id="responseInterceptSearchCount" class="search-count"></span>
-                </div>
-            </div>
-            <div class="get-warning" style="margin-bottom: 15px;">
-                <p><strong>⚠️ Note:</strong> Only headers and body can be modified. The browser API does not support changing the response status.</p>
-            </div>
-            <div class="intercept-editor">
-                <div class="editor-row">
-                    <label>Status Code:</label>
-                    <input type="number" id="responseStatusCode" min="100" max="599" readonly class="response-status-readonly" title="Response status is read-only because the browser API cannot modify it." aria-label="Response status code (read-only)">
-                    <label style="margin-left: 15px;">Status Text:</label>
-                    <input type="text" id="responseStatusText" readonly class="response-status-readonly" title="Response status is read-only because the browser API cannot modify it." aria-label="Response status text (read-only)">
-                </div>
-                <div class="editor-row">
-                    <label>Headers:</label>
-                    <textarea id="responseHeaders" rows="8"></textarea>
-                </div>
-                <div class="editor-row">
-                    <label>Body:</label>
-                    <textarea id="responseBody" rows="12"></textarea>
-                </div>
-            </div>
-            <div class="modal-actions">
-                <button class="btn disable-intercept-btn" id="disableInterceptResponseBtn">Disable Intercept</button>
-                <div class="primary-actions">
-                    <button class="btn btn-primary" id="forwardResponseBtn">Forward Response</button>
-                    <button class="btn btn-danger" id="dropResponseBtn">Drop Response</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="decoderModal" class="modal">
-        <div class="modal-content decoder-modal">
-            <div class="modal-header">
-                <h2>Decoder</h2>
-                <button class="close-btn" id="closeDecoderBtn">&times;</button>
-            </div>
-            <div class="decoder-container">
-                <div class="decoder-section">
-                    <div class="section-header">
-                        <h3>Input</h3>
-                        <div class="decoder-controls">
-                            <button class="btn" id="decoderPasteBtn">Paste</button>
-                            <button class="btn" id="decoderClearInputBtn">Clear</button>
+                    <div
+                        class="tab-content"
+                        id="responseTab"
+                        style="display: none"
+                    >
+                        <div class="view-toggle">
+                            <button class="view-btn active" data-view="raw">
+                                Raw
+                            </button>
+                            <button class="view-btn" data-view="formatted">
+                                Formatted
+                            </button>
+                            <button
+                                class="view-btn"
+                                data-view="preview"
+                                id="responsePreviewBtn"
+                                style="display: none"
+                            >
+                                Preview
+                            </button>
+                            <button
+                                class="copy-content-btn"
+                                id="copyResponseBtn"
+                            >
+                                Copy
+                            </button>
+                            <div class="content-search">
+                                <input
+                                    type="text"
+                                    id="responseSearchInput"
+                                    placeholder="Search in response..."
+                                    class="content-search-input"
+                                />
+                                <span
+                                    id="responseSearchCount"
+                                    class="search-count"
+                                ></span>
+                            </div>
+                        </div>
+                        <div class="content-area">
+                            <pre id="responseContent"></pre>
                         </div>
                     </div>
-                    <textarea id="decoderInput" placeholder="Enter text to decode/encode..."></textarea>
-                </div>
-                
-                <div class="decoder-actions-bar">
-                    <div class="action-group">
-                        <select id="decoderOperation">
-                            <option value="url">URL</option>
-                            <option value="base64">Base64</option>
-                            <option value="hex">Hex</option>
-                            <option value="html">HTML</option>
-                            <option value="jwt">JWT</option>
-                        </select>
-                        <button class="btn btn-primary" id="decoderEncodeBtn">Encode</button>
-                        <button class="btn btn-primary" id="decoderDecodeBtn">Decode</button>
-                    </div>
-                    <div class="action-group">
-                        <button class="btn" id="decoderSwapBtn" title="Swap Input/Output">⇅ Swap</button>
-                    </div>
-                </div>
 
-                <div class="decoder-section">
-                    <div class="section-header">
-                        <h3>Output</h3>
-                        <div class="decoder-controls">
-                            <button class="btn" id="decoderCopyBtn">Copy</button>
-                            <button class="btn" id="decoderClearOutputBtn">Clear</button>
+                    <div
+                        class="tab-content"
+                        id="securityTab"
+                        style="display: none"
+                    >
+                        <div class="view-toggle">
+                            <span class="security-tab-title"
+                                >Security Findings for Selected Request</span
+                            >
+                            <button class="btn" id="exportSecurityFindingsBtn">
+                                Export JSON
+                            </button>
+                        </div>
+                        <div class="content-area security-content-area">
+                            <div
+                                id="securityTabContent"
+                                class="security-findings-container"
+                            >
+                                <div class="security-no-findings">
+                                    <p>
+                                        No security findings for this request.
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <textarea id="decoderOutput" readonly></textarea>
                 </div>
             </div>
         </div>
-    </div>
-    
-    <div id="matchReplaceModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Match & Replace Rules</h2>
-                <button class="close-btn" id="closeMatchReplaceBtn">&times;</button>
-            </div>
-            <div class="settings-container">
-                <div class="setting-section">
-                    <p class="setting-description">Automatically replace content in requests matching patterns.</p>
-                    <div class="get-warning" style="margin-bottom: 15px;">
-                        <p><strong>⚠️ Note:</strong> Header modifications are applied natively. URL or Body modifications may require cancelling and resending the request, which means the original page might not receive the response.</p>
-                    </div>
-                    <div class="rules-list" id="matchReplaceRulesList">
-                        <!-- Rules will be added here -->
-                    </div>
-                    
-                    <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 15px;">
-                        <h3>Add New Rule</h3>
-                        <div class="editor-row">
-                            <label>Match Type:</label>
-                            <select id="mrMatchType">
+
+        <div id="highlightRulesModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Highlighting Rules</h2>
+                    <button class="close-btn" id="closeHighlightRulesBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="settings-container">
+                    <div class="setting-section">
+                        <p class="setting-description">
+                            Define rules to highlight requests based on URL
+                            patterns.
+                        </p>
+                        <div class="rules-list" id="highlightRulesList">
+                            <!-- Rules will be added here -->
+                        </div>
+                        <div class="add-rule-form">
+                            <input
+                                type="text"
+                                id="newRulePattern"
+                                placeholder="Pattern (e.g. /api/v1)"
+                            />
+                            <select id="newRuleType" class="rule-type-select">
                                 <option value="regex">Regex</option>
                                 <option value="contains">Contains</option>
                                 <option value="starts_with">Starts With</option>
                                 <option value="ends_with">Ends With</option>
                                 <option value="exact">Exact Match</option>
                             </select>
-                        </div>
-                        <div class="editor-row">
-                            <label>Match Pattern:</label>
-                            <input type="text" id="mrMatchPattern" placeholder="e.g. https://api.prod.com">
-                        </div>
-                        <div class="editor-row">
-                            <label>Replace With:</label>
-                            <input type="text" id="mrReplaceValue" placeholder="e.g. https://api.dev.com">
-                        </div>
-                        <div class="editor-row">
-                            <label>Target:</label>
-                            <select id="mrTarget">
-                                <option value="url">URL</option>
-                                <option value="headers">Headers</option>
-                                <option value="body">Request Body</option>
-                                <option value="response_body">Response Body</option>
-                            </select>
-                        </div>
-                        <div class="editor-row" style="text-align: right;">
-                            <button class="btn btn-primary" id="addMatchReplaceRuleBtn">Add Rule</button>
+                            <input
+                                type="color"
+                                id="newRuleColor"
+                                value="#ffeb3b"
+                            />
+                            <button
+                                class="btn btn-primary"
+                                id="addHighlightRuleBtn"
+                            >
+                                Add Rule
+                            </button>
                         </div>
                     </div>
-                </div>
-                <div class="settings-actions">
-                    <button class="btn btn-danger" id="clearMatchReplaceRulesBtn" style="margin-right: 10px;">Clear All</button>
-                    <button class="btn btn-primary" id="saveMatchReplaceRulesBtn">Save & Apply Rules</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div id="securityModal" class="modal">
-        <div class="modal-content security-modal">
-            <div class="modal-header">
-                <h2>
-                    Security Findings [BETA]
-                    <span id="securityModalBadge" class="security-modal-badge">0</span>
-                </h2>
-                <button class="close-btn" id="closeSecurityBtn">&times;</button>
-            </div>
-            <div class="security-modal-container">
-                <div class="security-summary" id="securitySummary">
-                    <div class="summary-item critical" data-category="apiKeys" tabindex="0" title="Filter by API Keys">
-                        <span class="summary-count" id="summaryApiKeys">0</span>
-                        <span class="summary-label">API Keys</span>
-                    </div>
-                    <div class="summary-item high" data-category="credentials" tabindex="0" title="Filter by Credentials">
-                        <span class="summary-count" id="summaryCredentials">0</span>
-                        <span class="summary-label">Credentials</span>
-                    </div>
-                    <div class="summary-item medium" id="summaryLibrariesItem" data-category="vulnerableLibraries" tabindex="0" title="Filter by JS Libs">
-                        <span class="summary-count" id="summaryLibraries">0</span>
-                        <span class="summary-label">JS Libs</span>
-                    </div>
-                    <div class="summary-item low" data-category="emails" tabindex="0" title="Filter by Emails">
-                        <span class="summary-count" id="summaryEmails">0</span>
-                        <span class="summary-label">Emails</span>
-                    </div>
-                    <div class="summary-item info" data-category="apiEndpoints" tabindex="0" title="Filter by Endpoints">
-                        <span class="summary-count" id="summaryEndpoints">0</span>
-                        <span class="summary-label">Endpoints</span>
-                    </div>
-                    <div class="summary-item info" data-category="paths" tabindex="0" title="Filter by Paths">
-                        <span class="summary-count" id="summaryPaths">0</span>
-                        <span class="summary-label">Paths</span>
-                    </div>
-                </div>
-                
-                <div class="security-filter-bar">
-                    <input type="text" id="securitySearchInput" placeholder="Search findings..." class="security-search-input">
-                    <select id="securityCategoryFilter" class="security-category-filter">
-                        <option value="all">All Categories</option>
-                        <option value="apiKeys">API Keys</option>
-                        <option value="credentials">Credentials</option>
-                        <option value="vulnerableLibraries">Vulnerable Libraries</option>
-                        <option value="emails">Emails</option>
-                        <option value="apiEndpoints">API Endpoints</option>
-                        <option value="parameters">Parameters</option>
-                        <option value="paths">Paths</option>
-                    </select>
-                    <select id="securitySeverityFilter" class="security-severity-filter">
-                        <option value="all">All Severities</option>
-                        <option value="critical">Critical</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                        <option value="info">Info</option>
-                    </select>
-                    <select id="securityDomainFilter" class="security-domain-filter">
-                        <option value="all">All Target Domains</option>
-                    </select>
-                    <select id="securityRefererFilter" class="security-referer-filter">
-                        <option value="all">All Referer Origins</option>
-                    </select>
-                    <button class="btn" id="clearSecurityFindingsBtn">Clear All</button>
-                    <button class="btn" id="exportAllSecurityBtn">Export JSON</button>
-                </div>
-                
-                <div class="security-findings-list" id="securityFindingsList">
-                    <div class="security-no-findings">
-                        <p>No security findings yet. Start browsing with capture enabled to scan response bodies.</p>
+                    <div class="settings-actions">
+                        <button
+                            class="btn btn-danger"
+                            id="clearHighlightRulesBtn"
+                            style="margin-right: 10px"
+                        >
+                            Clear All
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            id="saveHighlightRulesBtn"
+                        >
+                            Save Rules
+                        </button>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <script src="security-scanner.js"></script>
-    <script src="panel.js"></script>
-</body>
+        <div id="interceptModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>
+                        Intercepted Request
+                        <span
+                            id="interceptQueueCount"
+                            class="queue-count"
+                        ></span>
+                    </h2>
+                    <div class="content-search">
+                        <input
+                            type="text"
+                            id="interceptSearchInput"
+                            placeholder="Search..."
+                            class="content-search-input"
+                        />
+                        <span
+                            id="interceptSearchCount"
+                            class="search-count"
+                        ></span>
+                    </div>
+                </div>
+                <div
+                    class="get-warning"
+                    style="margin-bottom: 15px"
+                    id="interceptWarning"
+                >
+                    <p id="interceptBehaviorSummary">
+                        <strong>Note:</strong> Header changes are applied to the
+                        browser request. URL changes are native only during
+                        early interception. Method/body edits forward the
+                        original and open an unsent Repeater draft.
+                    </p>
+                </div>
+                <div class="intercept-editor">
+                    <div class="editor-row">
+                        <label>Method:</label>
+                        <select id="interceptMethod">
+                            <option>GET</option>
+                            <option>POST</option>
+                            <option>PUT</option>
+                            <option>PATCH</option>
+                            <option>DELETE</option>
+                            <option>HEAD</option>
+                            <option>OPTIONS</option>
+                        </select>
+                    </div>
+                    <div class="editor-row">
+                        <label>URL:</label>
+                        <input type="text" id="interceptUrl" />
+                    </div>
+                    <div class="editor-row">
+                        <label>Headers:</label>
+                        <textarea id="interceptHeaders" rows="8"></textarea>
+                    </div>
+                    <div class="editor-row">
+                        <label>Body:</label>
+                        <textarea id="interceptBody" rows="10"></textarea>
+                    </div>
+                    <p class="setting-description" id="interceptBodyHint"></p>
+                    <p
+                        class="intercept-validation-error"
+                        id="interceptValidationError"
+                        hidden
+                    ></p>
+                </div>
+                <div class="modal-actions">
+                    <button
+                        class="btn disable-intercept-btn"
+                        id="disableInterceptBtn"
+                    >
+                        Disable Intercept
+                    </button>
+                    <div class="primary-actions">
+                        <button class="btn btn-primary" id="forwardBtn">
+                            Forward
+                        </button>
+                        <button class="btn btn-danger" id="dropBtn">
+                            Drop
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="repeaterModal" class="modal">
+            <div class="modal-content repeater-modal">
+                <div class="modal-header">
+                    <h2>Request Repeater</h2>
+                    <button class="close-btn" id="closeRepeaterBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="repeater-container">
+                    <div class="repeater-content-wrapper">
+                        <div class="repeater-request">
+                            <div class="section-header">
+                                <h3>Request</h3>
+                                <div class="content-search">
+                                    <input
+                                        type="text"
+                                        id="repeaterRequestSearchInput"
+                                        placeholder="Search..."
+                                        class="content-search-input"
+                                    />
+                                    <span
+                                        id="repeaterRequestSearchCount"
+                                        class="search-count"
+                                    ></span>
+                                </div>
+                            </div>
+                            <div class="editor-row">
+                                <label>Method:</label>
+                                <select id="repeaterMethod">
+                                    <option>GET</option>
+                                    <option>POST</option>
+                                    <option>PUT</option>
+                                    <option>PATCH</option>
+                                    <option>DELETE</option>
+                                    <option>HEAD</option>
+                                    <option>OPTIONS</option>
+                                </select>
+                                <label style="margin-left: 15px">URL:</label>
+                                <input
+                                    type="text"
+                                    id="repeaterUrl"
+                                    style="flex: 1"
+                                />
+                            </div>
+                            <div class="editor-row">
+                                <label>Headers:</label>
+                                <textarea
+                                    id="repeaterHeaders"
+                                    rows="6"
+                                ></textarea>
+                            </div>
+                            <div class="editor-row">
+                                <label>Body:</label>
+                                <textarea id="repeaterBody" rows="8"></textarea>
+                            </div>
+                            <p
+                                class="setting-description"
+                                id="repeaterBodyHint"
+                            >
+                                Repeater requests originate from the extension,
+                                not the inspected page.
+                            </p>
+                            <div class="repeater-actions">
+                                <button
+                                    class="btn btn-primary"
+                                    id="sendRepeaterBtn"
+                                >
+                                    Send Request
+                                </button>
+                                <button class="btn" id="clearRepeaterBtn">
+                                    Clear Response
+                                </button>
+                            </div>
+                        </div>
+                        <div class="repeater-response">
+                            <div class="section-header">
+                                <h3>Response</h3>
+                                <div class="content-search">
+                                    <input
+                                        type="text"
+                                        id="repeaterResponseSearchInput"
+                                        placeholder="Search..."
+                                        class="content-search-input"
+                                    />
+                                    <span
+                                        id="repeaterResponseSearchCount"
+                                        class="search-count"
+                                    ></span>
+                                </div>
+                            </div>
+                            <div class="response-status" id="repeaterStatus">
+                                No response yet
+                            </div>
+                            <div class="response-tabs">
+                                <button
+                                    class="response-tab-btn active"
+                                    data-tab="headers"
+                                >
+                                    Headers
+                                </button>
+                                <button
+                                    class="response-tab-btn"
+                                    data-tab="body"
+                                >
+                                    Body
+                                </button>
+                                <button class="response-tab-btn" data-tab="raw">
+                                    Raw
+                                </button>
+                            </div>
+                            <div class="response-content">
+                                <pre id="repeaterResponseContent"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="interceptSettingsModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Intercept Settings</h2>
+                    <button class="close-btn" id="closeInterceptSettingsBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="settings-container">
+                    <div class="setting-section">
+                        <h3>Scope Control</h3>
+                        <label class="method-checkbox">
+                            <input type="checkbox" id="enableScope" />
+                            <span>Enable Scope Control (Global Filter)</span>
+                        </label>
+                        <p class="setting-description">
+                            Requests outside of scope are completely ignored by
+                            the extension (not logged or intercepted).
+                        </p>
+
+                        <p class="setting-description" style="margin-top: 10px">
+                            <strong>Include Patterns</strong> (whitelist -
+                            regex, one per line):
+                        </p>
+                        <textarea
+                            id="scopePatterns"
+                            rows="3"
+                            placeholder="Example: .*\\.example\\.com.*&#10;.*\\/api\\/v1\\/.*"
+                        ></textarea>
+
+                        <p class="setting-description" style="margin-top: 10px">
+                            <strong>Exclude Patterns</strong> (blacklist -
+                            regex, one per line):
+                        </p>
+                        <textarea
+                            id="scopeExcludePatterns"
+                            rows="3"
+                            placeholder="Example: .*\\/analytics\\/.*&#10;.*\\/ads\\/.*"
+                        ></textarea>
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>HTTP Methods to Intercept</h3>
+                        <div class="method-checkboxes">
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptGET"
+                                    data-method="GET"
+                                />
+                                <span>GET</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptPOST"
+                                    data-method="POST"
+                                    checked
+                                />
+                                <span>POST</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptPUT"
+                                    data-method="PUT"
+                                    checked
+                                />
+                                <span>PUT</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptPATCH"
+                                    data-method="PATCH"
+                                    checked
+                                />
+                                <span>PATCH</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptDELETE"
+                                    data-method="DELETE"
+                                    checked
+                                />
+                                <span>DELETE</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptHEAD"
+                                    data-method="HEAD"
+                                />
+                                <span>HEAD</span>
+                            </label>
+                            <label class="method-checkbox">
+                                <input
+                                    type="checkbox"
+                                    id="interceptOPTIONS"
+                                    data-method="OPTIONS"
+                                />
+                                <span>OPTIONS</span>
+                            </label>
+                        </div>
+                        <div
+                            class="get-warning"
+                            id="getWarning"
+                            style="display: none"
+                        >
+                            <p>
+                                <strong>⚠️ Warning:</strong> Intercepting GET
+                                requests can significantly impact browsing
+                                performance as it will block all navigation,
+                                images, scripts, and other resources.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>URL Patterns to Include (Intercept)</h3>
+                        <p class="setting-description">
+                            Only intercept requests matching these regex
+                            patterns. (Note: Requests must first pass Scope
+                            Control).
+                        </p>
+                        <textarea
+                            id="includePatterns"
+                            rows="3"
+                            placeholder="Example: api\\.example\\.com.*&#10;.*\\/api\\/.*"
+                        ></textarea>
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>URL Patterns to Exclude (Intercept)</h3>
+                        <p class="setting-description">
+                            Never intercept requests matching these regex
+                            patterns (even if they are in scope).
+                        </p>
+                        <textarea
+                            id="excludePatterns"
+                            rows="3"
+                            placeholder="Example: .*\\.(js|css|png|jpg|gif)$&#10;.*\\/static\\/.*"
+                        ></textarea>
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>File Extensions to Exclude</h3>
+                        <p class="setting-description">
+                            Never intercept requests for these file types
+                            (comma-separated):
+                        </p>
+                        <input
+                            type="text"
+                            id="excludeExtensions"
+                            placeholder="css, js, png, jpg, jpeg, gif, ico, svg, woff, woff2, ttf, eot"
+                        />
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>Response Interception</h3>
+                        <label class="method-checkbox">
+                            <input type="checkbox" id="interceptResponses" />
+                            <span
+                                >Intercept and allow modification of
+                                responses</span
+                            >
+                        </label>
+                        <div
+                            class="response-warning"
+                            id="responseWarning"
+                            style="display: none"
+                        >
+                            <p>
+                                <strong>⚠️ Warning:</strong> Response
+                                interception will pause all responses for
+                                intercepted requests until you manually forward
+                                or drop them. This can significantly impact
+                                browsing experience.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div
+                        class="setting-section"
+                        id="modifiedRequestActionSection"
+                    >
+                        <h3>Method/body edit handling</h3>
+                        <label class="method-checkbox experimental-mode-option">
+                            <input
+                                type="radio"
+                                name="modifiedRequestAction"
+                                id="modifiedRequestRepeaterDraft"
+                                value="repeater-draft"
+                                checked
+                            />
+                            <span
+                                ><strong
+                                    >Forward original and open Repeater
+                                    draft</strong
+                                >
+                                — safe default</span
+                            >
+                        </label>
+                        <label class="method-checkbox experimental-mode-option">
+                            <input
+                                type="radio"
+                                name="modifiedRequestAction"
+                                id="modifiedRequestCancelAndSend"
+                                value="cancel-and-send"
+                            />
+                            <span
+                                ><strong
+                                    >Cancel original and send edited
+                                    request</strong
+                                >
+                                — experimental</span
+                            >
+                        </label>
+                        <div
+                            class="response-warning"
+                            id="experimentalModeWarning"
+                            style="display: none"
+                        >
+                            <p id="experimentalModeRisk">
+                                <strong
+                                    >⚠ Experimental — page requests will
+                                    fail:</strong
+                                >
+                                The original page request is cancelled and the
+                                edited copy is sent from the extension. The page
+                                will not receive the edited response. Cookies,
+                                origin, CORS and service-worker behavior can
+                                differ.
+                            </p>
+                            <label
+                                class="method-checkbox experimental-mode-acknowledgement"
+                            >
+                                <input
+                                    type="checkbox"
+                                    id="experimentalModeAcknowledged"
+                                    aria-describedby="experimentalModeRisk experimentalModeSaveError"
+                                />
+                                <span
+                                    ><strong
+                                        >I understand these risks and want to
+                                        enable experimental mode.</strong
+                                    ></span
+                                >
+                            </label>
+                            <div
+                                id="experimentalModeSaveError"
+                                class="intercept-validation-error"
+                                role="alert"
+                                hidden
+                            >
+                                <strong>Settings were not saved.</strong> Check
+                                the risk acknowledgement above, or select the
+                                safe default, then click Save Settings again.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="setting-section">
+                        <h3>Early Interception</h3>
+                        <label class="method-checkbox">
+                            <input type="checkbox" id="useEarlyInterception" />
+                            <span
+                                >Use onBeforeRequest (Early Interception)</span
+                            >
+                        </label>
+                        <div
+                            class="get-warning"
+                            id="earlyInterceptionWarning"
+                            style="display: none"
+                        >
+                            <p>
+                                <strong>⚠️ Warning:</strong> This enables early
+                                URL interception:
+                            </p>
+                            <ul style="margin: 8px 0 0 20px; padding-left: 0">
+                                <li>
+                                    <strong>Stage 1:</strong> URL changes can be
+                                    applied natively. Headers are not available
+                                    yet.
+                                </li>
+                                <li>
+                                    <strong>Stage 2:</strong> Header changes can
+                                    be applied natively.
+                                </li>
+                                <li>
+                                    Method/body edits at either stage are moved
+                                    to Repeater; they do not replace the page
+                                    request.
+                                </li>
+                            </ul>
+                            <p style="margin-top: 8px">
+                                Without early interception, only Stage 2 is
+                                available.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="settings-actions">
+                        <button
+                            class="btn btn-primary"
+                            id="saveInterceptSettingsBtn"
+                        >
+                            Save Settings
+                        </button>
+                        <button class="btn" id="resetInterceptSettingsBtn">
+                            Reset to Default
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="responseInterceptModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>
+                        Intercepted Response
+                        <span
+                            id="responseQueueCount"
+                            class="queue-count"
+                        ></span>
+                    </h2>
+                    <div class="content-search">
+                        <input
+                            type="text"
+                            id="responseInterceptSearchInput"
+                            placeholder="Search..."
+                            class="content-search-input"
+                        />
+                        <span
+                            id="responseInterceptSearchCount"
+                            class="search-count"
+                        ></span>
+                    </div>
+                </div>
+                <div class="get-warning" style="margin-bottom: 15px">
+                    <p id="responseStageHint">
+                        <strong>⚠️ Note:</strong> Response status is read-only.
+                        Headers are edited before the body; body-stage Drop can
+                        only return an empty body because headers have already
+                        been delivered.
+                    </p>
+                </div>
+                <div class="intercept-editor">
+                    <div class="editor-row">
+                        <label>Status Code:</label>
+                        <input
+                            type="number"
+                            id="responseStatusCode"
+                            min="100"
+                            max="599"
+                            readonly
+                            class="response-status-readonly"
+                            title="Response status is read-only because the browser API cannot modify it."
+                            aria-label="Response status code (read-only)"
+                        />
+                        <label style="margin-left: 15px">Status Text:</label>
+                        <input
+                            type="text"
+                            id="responseStatusText"
+                            readonly
+                            class="response-status-readonly"
+                            title="Response status is read-only because the browser API cannot modify it."
+                            aria-label="Response status text (read-only)"
+                        />
+                    </div>
+                    <div class="editor-row">
+                        <label>Headers:</label>
+                        <textarea id="responseHeaders" rows="8"></textarea>
+                    </div>
+                    <div class="editor-row">
+                        <label>Body:</label>
+                        <textarea id="responseBody" rows="12"></textarea>
+                    </div>
+                    <p
+                        class="intercept-validation-error"
+                        id="responseInterceptValidationError"
+                        hidden
+                    ></p>
+                </div>
+                <div class="modal-actions">
+                    <button
+                        class="btn disable-intercept-btn"
+                        id="disableInterceptResponseBtn"
+                    >
+                        Disable Intercept
+                    </button>
+                    <div class="primary-actions">
+                        <button class="btn btn-primary" id="forwardResponseBtn">
+                            Forward Response
+                        </button>
+                        <button class="btn btn-danger" id="dropResponseBtn">
+                            Drop Response
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="decoderModal" class="modal">
+            <div class="modal-content decoder-modal">
+                <div class="modal-header">
+                    <h2>Decoder</h2>
+                    <button class="close-btn" id="closeDecoderBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="decoder-container">
+                    <div class="decoder-section">
+                        <div class="section-header">
+                            <h3>Input</h3>
+                            <div class="decoder-controls">
+                                <button class="btn" id="decoderClearInputBtn">
+                                    Clear
+                                </button>
+                            </div>
+                        </div>
+                        <textarea
+                            id="decoderInput"
+                            placeholder="Enter text to decode/encode..."
+                        ></textarea>
+                    </div>
+
+                    <div class="decoder-actions-bar">
+                        <div class="action-group">
+                            <select id="decoderOperation">
+                                <option value="url">URL</option>
+                                <option value="base64">Base64</option>
+                                <option value="hex">Hex</option>
+                                <option value="html">HTML</option>
+                                <option value="jwt">JWT</option>
+                            </select>
+                            <button
+                                class="btn btn-primary"
+                                id="decoderEncodeBtn"
+                            >
+                                Encode
+                            </button>
+                            <button
+                                class="btn btn-primary"
+                                id="decoderDecodeBtn"
+                            >
+                                Decode
+                            </button>
+                        </div>
+                        <div class="action-group">
+                            <button
+                                class="btn"
+                                id="decoderSwapBtn"
+                                title="Swap Input/Output"
+                            >
+                                ⇅ Swap
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="decoder-section">
+                        <div class="section-header">
+                            <h3>Output</h3>
+                            <div class="decoder-controls">
+                                <button class="btn" id="decoderCopyBtn">
+                                    Copy
+                                </button>
+                                <button class="btn" id="decoderClearOutputBtn">
+                                    Clear
+                                </button>
+                            </div>
+                        </div>
+                        <textarea id="decoderOutput" readonly></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="matchReplaceModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Match & Replace Rules</h2>
+                    <button class="close-btn" id="closeMatchReplaceBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="settings-container">
+                    <div class="setting-section">
+                        <p class="setting-description">
+                            Automatically replace URL, header, or text
+                            response-body content matching patterns.
+                        </p>
+                        <div class="get-warning" style="margin-bottom: 15px">
+                            <p>
+                                <strong>⚠️ Note:</strong> Request-body
+                                replacement is unavailable because Firefox
+                                cannot transparently replace request bytes. Use
+                                Repeater for body edits.
+                            </p>
+                        </div>
+                        <div class="rules-list" id="matchReplaceRulesList">
+                            <!-- Rules will be added here -->
+                        </div>
+
+                        <div
+                            style="
+                                border-top: 1px solid #eee;
+                                margin-top: 20px;
+                                padding-top: 15px;
+                            "
+                        >
+                            <h3>Add New Rule</h3>
+                            <div class="editor-row">
+                                <label>Target:</label>
+                                <select id="mrTarget">
+                                    <option value="url">URL</option>
+                                    <option value="headers">Headers</option>
+                                    <option value="body" disabled>
+                                        Request Body (use Repeater)
+                                    </option>
+                                    <option value="response_body">
+                                        Response Body
+                                    </option>
+                                </select>
+                            </div>
+                            <div class="editor-row" id="mrHeaderNameRow" hidden>
+                                <label for="mrHeaderName">Header Name:</label>
+                                <input
+                                    type="text"
+                                    id="mrHeaderName"
+                                    placeholder="e.g. x-test-header"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                />
+                                <small class="editor-hint"
+                                    >Matched case-insensitively. The value rule
+                                    applies only to this header.</small
+                                >
+                            </div>
+                            <div class="editor-row">
+                                <label>Match Type:</label>
+                                <select id="mrMatchType">
+                                    <option value="regex">Regex</option>
+                                    <option value="contains">Contains</option>
+                                    <option value="starts_with">
+                                        Starts With
+                                    </option>
+                                    <option value="ends_with">Ends With</option>
+                                    <option value="exact">Exact Match</option>
+                                </select>
+                            </div>
+                            <div class="editor-row">
+                                <label
+                                    id="mrMatchPatternLabel"
+                                    for="mrMatchPattern"
+                                    >Match Pattern:</label
+                                >
+                                <input
+                                    type="text"
+                                    id="mrMatchPattern"
+                                    placeholder="e.g. https://api.prod.com"
+                                />
+                            </div>
+                            <div class="editor-row">
+                                <label>Replace With:</label>
+                                <input
+                                    type="text"
+                                    id="mrReplaceValue"
+                                    placeholder="e.g. https://api.dev.com"
+                                />
+                            </div>
+                            <div class="editor-row" style="text-align: right">
+                                <button
+                                    class="btn btn-primary"
+                                    id="addMatchReplaceRuleBtn"
+                                >
+                                    Add Rule
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-actions">
+                        <button
+                            class="btn btn-danger"
+                            id="clearMatchReplaceRulesBtn"
+                            style="margin-right: 10px"
+                        >
+                            Clear All
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            id="saveMatchReplaceRulesBtn"
+                        >
+                            Save & Apply Rules
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="securityModal" class="modal">
+            <div class="modal-content security-modal">
+                <div class="modal-header">
+                    <h2>
+                        Security Findings [BETA]
+                        <span
+                            id="securityModalBadge"
+                            class="security-modal-badge"
+                            >0</span
+                        >
+                    </h2>
+                    <button class="close-btn" id="closeSecurityBtn">
+                        &times;
+                    </button>
+                </div>
+                <div class="security-modal-container">
+                    <div class="security-summary" id="securitySummary">
+                        <div
+                            class="summary-item critical"
+                            data-category="apiKeys"
+                            tabindex="0"
+                            title="Filter by API Keys"
+                        >
+                            <span class="summary-count" id="summaryApiKeys"
+                                >0</span
+                            >
+                            <span class="summary-label">API Keys</span>
+                        </div>
+                        <div
+                            class="summary-item high"
+                            data-category="credentials"
+                            tabindex="0"
+                            title="Filter by Credentials"
+                        >
+                            <span class="summary-count" id="summaryCredentials"
+                                >0</span
+                            >
+                            <span class="summary-label">Credentials</span>
+                        </div>
+                        <div
+                            class="summary-item medium"
+                            id="summaryLibrariesItem"
+                            data-category="vulnerableLibraries"
+                            tabindex="0"
+                            title="Filter by JS Libs"
+                        >
+                            <span class="summary-count" id="summaryLibraries"
+                                >0</span
+                            >
+                            <span class="summary-label">JS Libs</span>
+                        </div>
+                        <div
+                            class="summary-item low"
+                            data-category="emails"
+                            tabindex="0"
+                            title="Filter by Emails"
+                        >
+                            <span class="summary-count" id="summaryEmails"
+                                >0</span
+                            >
+                            <span class="summary-label">Emails</span>
+                        </div>
+                        <div
+                            class="summary-item info"
+                            data-category="apiEndpoints"
+                            tabindex="0"
+                            title="Filter by Endpoints"
+                        >
+                            <span class="summary-count" id="summaryEndpoints"
+                                >0</span
+                            >
+                            <span class="summary-label">Endpoints</span>
+                        </div>
+                        <div
+                            class="summary-item info"
+                            data-category="paths"
+                            tabindex="0"
+                            title="Filter by Paths"
+                        >
+                            <span class="summary-count" id="summaryPaths"
+                                >0</span
+                            >
+                            <span class="summary-label">Paths</span>
+                        </div>
+                        <div class="security-db-update">
+                            <button
+                                type="button"
+                                id="updateVulnerabilityDbBtn"
+                                class="security-db-update-btn"
+                                title="Download the latest vulnerability database from Retire.js"
+                            >
+                                Update DB
+                            </button>
+                            <label
+                                class="security-db-auto"
+                                title="Automatically refresh the vulnerability database on startup when it is older than 7 days"
+                            >
+                                <input
+                                    type="checkbox"
+                                    id="autoUpdateVulnerabilityDb"
+                                />
+                                <span>Auto</span>
+                            </label>
+                            <span
+                                class="security-db-status"
+                                id="vulnerabilityDbStatus"
+                                >Not loaded</span
+                            >
+                        </div>
+                    </div>
+
+                    <div class="security-filter-bar">
+                        <input
+                            type="text"
+                            id="securitySearchInput"
+                            placeholder="Search findings..."
+                            class="security-search-input"
+                        />
+                        <select
+                            id="securityCategoryFilter"
+                            class="security-category-filter"
+                        >
+                            <option value="all">All Categories</option>
+                            <option value="apiKeys">API Keys</option>
+                            <option value="credentials">Credentials</option>
+                            <option value="vulnerableLibraries">
+                                Vulnerable Libraries
+                            </option>
+                            <option value="emails">Emails</option>
+                            <option value="apiEndpoints">API Endpoints</option>
+                            <option value="parameters">Parameters</option>
+                            <option value="paths">Paths</option>
+                        </select>
+                        <select
+                            id="securitySeverityFilter"
+                            class="security-severity-filter"
+                        >
+                            <option value="all">All Severities</option>
+                            <option value="critical">Critical</option>
+                            <option value="high">High</option>
+                            <option value="medium">Medium</option>
+                            <option value="low">Low</option>
+                            <option value="info">Info</option>
+                        </select>
+                        <select
+                            id="securityDomainFilter"
+                            class="security-domain-filter"
+                        >
+                            <option value="all">All Target Domains</option>
+                        </select>
+                        <select
+                            id="securityRefererFilter"
+                            class="security-referer-filter"
+                        >
+                            <option value="all">All Referer Origins</option>
+                        </select>
+                        <button class="btn" id="clearSecurityFindingsBtn">
+                            Clear All
+                        </button>
+                        <button class="btn" id="exportAllSecurityBtn">
+                            Export JSON
+                        </button>
+                    </div>
+
+                    <div
+                        class="security-findings-list"
+                        id="securityFindingsList"
+                    >
+                        <div class="security-no-findings">
+                            <p>
+                                No security findings yet. Start browsing with
+                                capture enabled to scan response bodies.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script src="../shared/http-model.js"></script>
+        <script src="../shared/request-interception.js"></script>
+        <script src="../shared/match-replace.js"></script>
+        <script src="../shared/har-matcher.js"></script>
+        <script src="security-scanner.js"></script>
+        <script src="panel.js"></script>
+    </body>
 </html>

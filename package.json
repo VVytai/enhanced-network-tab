@@ -1,0 +1,19 @@
+{
+  "name": "enhanced-network-tab",
+  "version": "2.1.0",
+  "private": true,
+  "description": "Development checks and packaging for the Enhanced Network Tab Firefox extension",
+  "scripts": {
+    "check": "node --check shared/library-scanner.js && node --check shared/tab-session.js && node --check shared/interception-lifecycle.js && node --check shared/request-interception.js && node --check shared/match-replace.js && node --check shared/http-model.js && node --check shared/byte-buffer.js && node --check shared/har-matcher.js && node --check shared/finding-privacy.js && node --check background/background.js && node --check devtools/devtools.js && node --check devtools/panel.js && node --check devtools/security-scanner.js",
+    "test": "node scripts/run-tests.mjs",
+    "lint:addon": "web-ext lint --source-dir . --ignore-files Archive.zip IMPLEMENTATION_PLAN.md WORK_CONTEXT.md package.json package-lock.json README.md readme-pictures tests scripts docs .github node_modules dist coverage",
+    "package": "node scripts/package-extension.mjs",
+    "verify": "npm run check && npm test && npm run lint:addon"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "web-ext": "10.5.0"
+  }
+}

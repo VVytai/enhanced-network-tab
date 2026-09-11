@@ -1,22 +1,43 @@
-let captureEnabled = false;
-let interceptEnabled = false;
 let interceptSettings = {
-  methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
+  methods: ["POST", "PUT", "PATCH", "DELETE"],
   includeGET: false,
   urlPatterns: [],
   excludePatterns: [],
-  excludeExtensions: ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot'],
+  excludeExtensions: [
+    "css",
+    "js",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "ico",
+    "svg",
+    "woff",
+    "woff2",
+    "ttf",
+    "eot",
+  ],
   interceptResponses: false,
   useEarlyInterception: false,
+  modifiedRequestAction: "repeater-draft",
   scopeEnabled: false,
   scopePatterns: [],
-  scopeExcludePatterns: []
+  scopeExcludePatterns: [],
 };
 let matchReplaceRules = [];
 let requests = new Map();
 let activeTabId = null;
-let devtoolsPorts = new Map();
-let devtoolsPortCounter = 0;
+const tabSessions =
+  globalThis.EnhancedNetworkTab.TabSessionCore.createTabSessionStore();
+const devtoolsPorts =
+  globalThis.EnhancedNetworkTab.TabSessionCore.createPortRegistry();
+const HttpModel = globalThis.EnhancedNetworkTab.HttpModelCore;
+const ByteBufferCore = globalThis.EnhancedNetworkTab.ByteBufferCore;
+const SecurityScanner = globalThis.EnhancedNetworkTab.SecurityScannerCore;
+const FindingPrivacy = globalThis.EnhancedNetworkTab.FindingPrivacyCore;
+const RequestInterception =
+  globalThis.EnhancedNetworkTab.RequestInterceptionCore;
+const MatchReplace = globalThis.EnhancedNetworkTab.MatchReplaceCore;
 let inspectedTabs = new Set(); // Track tabs that have DevTools open
 let pendingRequests = new Map();
 let pendingResponses = new Map();
@@ -24,33 +45,109 @@ let requestIdCounter = 0;
 let requestIdMap = new Map();
 let interceptedRequestIds = new Set();
 let interceptedResponseTabIds = new Map();
-let pendingUrlModifications = new Map();
-let pendingHeaderModifications = new Map();
 let pendingResponseHeaderIntercepts = new Map();
-let pendingBodyModifications = new Map();
+let responseInterceptionControls = new Map();
 
-// Repeater request tracking - for handling forbidden headers (Cookie, Host, Origin, etc.)
-let pendingRepeaterRequests = new Map(); // repeaterId -> { headers, url, method, body }
-let repeaterIdCounter = 0;
+// Extension-origin request tracking handles headers that fetch cannot set directly.
+let pendingExtensionRequests = new Map();
+const extensionRequestChains =
+  RequestInterception.createExtensionRequestChainTracker();
+const ruleRedirects = RequestInterception.createRuleRedirectTracker();
+let extensionRequestCounter = 0;
+let pendingReplacementJobs = new Map();
+const replacementResults = RequestInterception.createBoundedResultStore({
+  maxEntries: 25,
+  maxBytes: 10 * 1024 * 1024,
+});
+let pendingPromotionId = null;
+let seenPromotionIds = [];
 
-const MAX_REQUESTS = 1000;
+const MAX_REQUESTS_PER_TAB = 1000;
+const DISPLAY_CAPTURE_LIMIT = 1024 * 1024;
+const SECURITY_SCAN_LIMIT = 5 * 1024 * 1024;
+const EDITABLE_RESPONSE_LIMIT = 10 * 1024 * 1024;
+const SECURITY_FINDING_TTL_MS = 24 * 60 * 60 * 1000;
+const REQUEST_INTERCEPT_TIMEOUT_MS = 60 * 1000;
+const RESPONSE_HEADER_INTERCEPT_TIMEOUT_MS = 60 * 1000;
+const RESPONSE_BODY_INTERCEPT_TIMEOUT_MS = 120 * 1000;
+const EXTENSION_REQUEST_TIMEOUT_MS = 30 * 1000;
+const REPLACEMENT_CANCEL_CONFIRM_TIMEOUT_MS = 2 * 1000;
+const EXTENSION_REQUEST_MARKER_HEADER = "X-Enhanced-Network-Request-ID";
+const { armPendingTimeout, markResponseBodyBypass, settlePendingData } =
+  globalThis.EnhancedNetworkTab.InterceptionLifecycleCore;
 
-function safeUint8ArrayToBase64(uint8Array) {
-  if (!uint8Array) return '';
-  try {
-    let binary = '';
-    const chunkSize = 8192;
-    const bytes = uint8Array instanceof Uint8Array ? uint8Array : new Uint8Array(uint8Array);
-    const len = bytes.length;
-    for (let i = 0; i < len; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, chunk);
+function sanitizeMatchReplaceRules(rules) {
+  return MatchReplace.sanitizeRules(rules);
+}
+
+function updateResponseCapture(request, collector, isBase64) {
+  const captured = collector.toUint8Array();
+  const displayBytes = captured.subarray(0, DISPLAY_CAPTURE_LIMIT);
+
+  request.totalBytes = collector.totalBytes;
+  request.capturedBytes = Math.min(collector.totalBytes, DISPLAY_CAPTURE_LIMIT);
+  request.scannedBytes = Math.min(collector.totalBytes, SECURITY_SCAN_LIMIT);
+  request.truncated = collector.totalBytes > DISPLAY_CAPTURE_LIMIT;
+  request.responseSize = collector.totalBytes;
+  request.isBase64 = isBase64;
+  request.responseBody = isBase64
+    ? HttpModel.bytesToBase64(displayBytes)
+    : new TextDecoder("utf-8").decode(displayBytes);
+
+  return captured;
+}
+
+function notifyInterceptionReleased(pendingData, kind, reason) {
+  notifyDevTools(
+    {
+      type: "interceptionReleased",
+      requestId: pendingData.id || pendingData.requestId,
+      stage: pendingData.stage,
+      kind,
+      reason,
+    },
+    pendingData.tabId ?? pendingData.request?.tabId,
+  );
+}
+
+function resolvePendingRequest(
+  originalRequestId,
+  pendingData,
+  response,
+  reason,
+) {
+  return settlePendingData(pendingData, () => {
+    pendingRequests.delete(originalRequestId);
+    const request = requests.get(pendingData.id);
+    if (request) {
+      request.interceptionHandled = true;
+      request.intercepted = false;
+
+      if (reason === "timeout") {
+        request.statusLine = "Forwarded (Intercept Timeout)";
+        notifyDevTools({ type: "updateRequest", request });
+      } else if (reason === "disabled") {
+        request.statusLine = "Forwarded (Intercept Disabled)";
+        notifyDevTools({ type: "updateRequest", request });
+      }
     }
-    return btoa(binary);
-  } catch (e) {
-    console.error('Failed to encode Uint8Array to Base64:', e);
-    return '';
-  }
+    pendingData.resolve(response);
+    notifyInterceptionReleased(pendingData, "request", reason);
+  });
+}
+
+function resolvePendingResponseHeaders(
+  requestId,
+  pendingData,
+  response,
+  reason,
+) {
+  return settlePendingData(pendingData, () => {
+    markResponseBodyBypass(pendingData, reason);
+    pendingResponseHeaderIntercepts.delete(requestId);
+    pendingData.resolve(response);
+    notifyInterceptionReleased(pendingData, "response", reason);
+  });
 }
 
 // ==========================================
@@ -59,194 +156,7 @@ function safeUint8ArrayToBase64(uint8Array) {
 let securityFindings = [];
 const MAX_FINDINGS = 1000;
 
-const SecurityScanner = {
-    // API Key patterns - comprehensive patterns for background scanning
-    apiKeyPatterns: [
-        // AWS
-        { pattern: /AKIA[0-9A-Z]{16}/g, type: 'AWS Access Key ID', severity: 'critical', strict: true },
-        { pattern: /["']?(?:aws[_-]?secret[_-]?access[_-]?key|aws[_-]?secret|aws[_-]?secret[_-]?key)["']?\s*[:=]\s*["']([a-zA-Z0-9/+=]{40})["']/gi, type: 'AWS Secret Key', severity: 'critical', strict: false },
-        
-        // Google
-        { pattern: /AIza[0-9A-Za-z\-_]{35}/g, type: 'Google API Key', severity: 'critical', strict: true },
-        { pattern: /ya29\.[0-9A-Za-z\-_]+/g, type: 'Google OAuth Access Token', severity: 'critical', strict: true },
-        
-        // GitHub
-        { pattern: /ghp_[a-zA-Z0-9]{36}/g, type: 'GitHub Personal Access Token', severity: 'critical', strict: true },
-        { pattern: /github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/g, type: 'GitHub Fine-Grained Token', severity: 'critical', strict: true },
-        { pattern: /gho_[a-zA-Z0-9]{36}/g, type: 'GitHub OAuth Token', severity: 'critical', strict: true },
-        { pattern: /ghu_[a-zA-Z0-9]{36}/g, type: 'GitHub User-to-Server Token', severity: 'critical', strict: true },
-        { pattern: /ghs_[a-zA-Z0-9]{36}/g, type: 'GitHub Server-to-Server Token', severity: 'critical', strict: true },
-        { pattern: /ghr_[a-zA-Z0-9]{36}/g, type: 'GitHub Refresh Token', severity: 'critical', strict: true },
-        
-        // OpenAI
-        { pattern: /sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}/g, type: 'OpenAI User API Key', severity: 'critical', strict: true },
-        { pattern: /sk-proj-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}/g, type: 'OpenAI Project Key', severity: 'critical', strict: true },
-        { pattern: /sk-proj-[a-zA-Z0-9_-]{20,}/g, type: 'OpenAI Project Key (Generic)', severity: 'critical', strict: true },
-        { pattern: /sk-[a-zA-Z0-9_-]{32,}/g, type: 'OpenAI API Key (Generic)', severity: 'critical', strict: true },
-        
-        // Stripe
-        { pattern: /sk_live_[0-9a-zA-Z]{24,}/g, type: 'Stripe Live Secret Key', severity: 'critical', strict: true },
-        { pattern: /sk_test_[0-9a-zA-Z]{24}/g, type: 'Stripe Test Secret Key', severity: 'medium', strict: true },
-        { pattern: /rk_live_[0-9a-zA-Z]{99}/g, type: 'Stripe Restricted Key', severity: 'critical', strict: true },
-        
-        // Slack
-        { pattern: /xoxb-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}/g, type: 'Slack Bot Token', severity: 'critical', strict: true },
-        { pattern: /xoxp-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}/g, type: 'Slack User Token', severity: 'critical', strict: true },
-        { pattern: /xoxa-[0-9]+-[0-9]+-[0-9a-zA-Z]{24,}/g, type: 'Slack App Token', severity: 'critical', strict: true },
-        { pattern: /xoxr-[0-9]+-[0-9a-zA-Z]{24,}/g, type: 'Slack Refresh Token', severity: 'critical', strict: true },
-        { pattern: /xoxs-[0-9]+-[0-9]+-[0-9a-zA-Z]{24,}/g, type: 'Slack Session Token', severity: 'critical', strict: true },
-        { pattern: /xoxe\.xoxp-1-[0-9a-zA-Z]{166}/g, type: 'Slack Config Token', severity: 'critical', strict: true },
-        { pattern: /xoxe-1-[0-9a-zA-Z]{147}/g, type: 'Slack Refresh Token', severity: 'critical', strict: true },
-        { pattern: /T[a-zA-Z0-9_]{8}\/B[a-zA-Z0-9_]{8}\/[a-zA-Z0-9_]{24}/g, type: 'Slack Webhook', severity: 'high', strict: true },
-        
-        // Facebook
-        { pattern: /EAACEdEose0cBA[0-9A-Za-z]+/g, type: 'Facebook Access Token', severity: 'critical', strict: true },
-        
-        // Square
-        { pattern: /sqOatp-[0-9A-Za-z\-_]{22}/g, type: 'Square Access Token', severity: 'critical', strict: true },
-        { pattern: /sq0csp-[0-9A-Za-z\-_]{43}/g, type: 'Square OAuth Secret', severity: 'critical', strict: true },
-        
-        // Twilio
-        { pattern: /SK[0-9a-fA-F]{32}/g, type: 'Twilio API Key', severity: 'critical', strict: true },
-        
-        // SendGrid
-        { pattern: /SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/g, type: 'SendGrid API Key', severity: 'critical', strict: true },
-        
-        // Mailgun
-        { pattern: /key-[0-9a-zA-Z]{32}/g, type: 'Mailgun API Key', severity: 'critical', strict: true },
-        
-        // MailChimp
-        { pattern: /[0-9a-f]{32}-us[0-9]{1,2}/g, type: 'MailChimp Access Token', severity: 'critical', strict: true },
-        
-        // WakaTime
-        { pattern: /waka_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, type: 'WakaTime API Key', severity: 'critical', strict: true },
-        
-        // Amazon MWS
-        { pattern: /amzn\.mws\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, type: 'Amazon MWS Auth Token', severity: 'critical', strict: true },
-        
-        // Foursquare
-        { pattern: /R_[0-9a-f]{32}/g, type: 'Foursquare Secret Key', severity: 'critical', strict: true },
-        
-        // Picatic
-        { pattern: /sk_live_[0-9a-z]{32}/g, type: 'Picatic API Key', severity: 'critical', strict: true },
-        
-        // Other services
-        { pattern: /glpat-[a-zA-Z0-9_-]{20}/g, type: 'GitLab Personal Access Token', severity: 'critical', strict: true },
-        { pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/g, type: 'Anthropic API Key', severity: 'critical', strict: true },
-        { pattern: /hf_[a-zA-Z0-9]{34}/g, type: 'HuggingFace API Token', severity: 'critical', strict: true },
-        { pattern: /r8_[a-zA-Z0-9]{37}/g, type: 'Replicate API Token', severity: 'critical', strict: true },
-        { pattern: /dop_v1_[a-f0-9]{64}/g, type: 'DigitalOcean Token', severity: 'critical', strict: true },
-        { pattern: /secret_[a-zA-Z0-9]{43}/g, type: 'Notion Integration Token', severity: 'critical', strict: true },
-        
-        // Azure
-        { pattern: /DefaultEndpointsProtocol=https;AccountName=[a-z0-9]+;AccountKey=[A-Za-z0-9+/=]+/g, type: 'Azure Storage Connection', severity: 'critical', strict: true },
-        
-        // JWT
-        { pattern: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, type: 'JWT Token', severity: 'medium', strict: false },
-        
-        // Basic Auth in URLs
-        { pattern: /https?:\/\/[A-Za-z0-9_\-]+:[A-Za-z0-9_\-]+@[^\s"']+/g, type: 'Basic Auth URL', severity: 'critical', strict: true },
-        
-        // Private Keys
-        { pattern: /-----BEGIN RSA PRIVATE KEY-----/g, type: 'RSA Private Key', severity: 'critical', strict: true },
-        { pattern: /-----BEGIN PRIVATE KEY-----/g, type: 'Private Key', severity: 'critical', strict: true },
-        
-        // Generic patterns with JSON support
-        { pattern: /["']?secret_key["']?\s*[:=]\s*["']([a-zA-Z0-9_\-/+=]{16,})["']/gi, type: 'Secret Key', severity: 'critical', strict: false },
-        { pattern: /["']?(?:api_key|apikey)["']?\s*[:=]\s*["']([a-zA-Z0-9_\-]{20,})["']/gi, type: 'API Key', severity: 'high', strict: false },
-        { pattern: /["']?access_token["']?\s*[:=]\s*["']([a-zA-Z0-9_\-/+=]{20,})["']/gi, type: 'Access Token', severity: 'high', strict: false },
-        { pattern: /["']?(?:api_secret|apiSecret)["']?\s*[:=]\s*["']([a-zA-Z0-9_\-/+=]{20,})["']/gi, type: 'API Secret', severity: 'critical', strict: false },
-        { pattern: /["']?client_secret["']?\s*[:=]\s*["']([a-zA-Z0-9_\-/+=]{16,})["']/gi, type: 'Client Secret', severity: 'critical', strict: false },
-    ],
-
-    credentialPatterns: [
-        { pattern: /["']?(?:password|passwd|pwd)["']?\s*[:=]\s*["']([^"']{6,})["']/gi, type: 'Password', severity: 'critical', strict: false },
-        { pattern: /["']?(?:db[_-]?password|database[_-]?password)["']?\s*[:=]\s*["']([^"']{6,})["']/gi, type: 'Database Password', severity: 'critical', strict: false },
-        { pattern: /["']?(?:connection[_-]?string|conn[_-]?str|database[_-]?url|db[_-]?url)["']?\s*[:=]\s*["']([^"']+)["']/gi, type: 'Connection String', severity: 'critical', strict: false },
-        
-        // Database URLs with credentials
-        { pattern: /mongodb(?:\+srv)?:\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi, type: 'MongoDB Connection URL', severity: 'critical', strict: true },
-        { pattern: /postgres(?:ql)?:\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi, type: 'PostgreSQL Connection URL', severity: 'critical', strict: true },
-        { pattern: /mysql:\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi, type: 'MySQL Connection URL', severity: 'critical', strict: true },
-        { pattern: /redis:\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi, type: 'Redis Connection URL', severity: 'critical', strict: true },
-        { pattern: /amqp:\/\/[^\s"'<>]+:[^\s"'<>]+@[^\s"'<>]+/gi, type: 'RabbitMQ Connection URL', severity: 'critical', strict: true },
-    ],
-
-    falsePositives: [
-        'example.com', 'localhost', '127.0.0.1', 'test', 'demo', 'sample', 
-        'placeholder', 'your_api_key', 'your_secret', 'api_key_here', 
-        'secret_here', 'xxx', 'yyy', 'zzz', 'insert_', '_here', 'your-', 
-        '-here', 'replace_', 'change_this', 'data:image', 'data:text'
-    ],
-
-    isFalsePositive(match, type) {
-        const matchLower = match.toLowerCase();
-        for (const fp of this.falsePositives) {
-            if (matchLower.includes(fp)) return true;
-        }
-        if (type === 'JWT Token') {
-            const parts = match.split('.');
-            if (parts.length < 3 || match.length < 50) return true;
-        }
-        if (type.includes('Password')) {
-            if (/["'](?:true|false|null|undefined|none|\*+|\.{3,})["']/i.test(match)) return true;
-        }
-        return false;
-    },
-
-    scanWithPatterns(content, patterns, category) {
-        const findings = [];
-        for (const patternInfo of patterns) {
-            try {
-                patternInfo.pattern.lastIndex = 0;
-                let match;
-                while ((match = patternInfo.pattern.exec(content)) !== null) {
-                    const matchText = match[0];
-                    if (!patternInfo.strict && this.isFalsePositive(matchText, patternInfo.type)) continue;
-                    findings.push({
-                        category: category,
-                        type: patternInfo.type,
-                        match: matchText.length > 200 ? matchText.substring(0, 200) + '...' : matchText,
-                        severity: patternInfo.severity || 'info'
-                    });
-                    if (patternInfo.pattern.lastIndex === match.index) {
-                        patternInfo.pattern.lastIndex++;
-                    }
-                }
-            } catch (e) {
-                console.error('Pattern scan error:', patternInfo.type, e);
-            }
-        }
-        return findings;
-    },
-
-    removeDuplicates(findings) {
-        const seen = new Set();
-        return findings.filter(f => {
-            const key = `${f.type}:${f.match}`;
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-        });
-    },
-
-    scan(content, url = '') {
-        if (!content || typeof content !== 'string' || content.length > 5 * 1024 * 1024) {
-            return null;
-        }
-        const apiKeys = this.removeDuplicates(this.scanWithPatterns(content, this.apiKeyPatterns, 'API Keys'));
-        const credentials = this.removeDuplicates(this.scanWithPatterns(content, this.credentialPatterns, 'Credentials'));
-        const totalFindings = apiKeys.length + credentials.length;
-        if (totalFindings === 0) return null;
-        return { url, timestamp: new Date().toISOString(), apiKeys, credentials, totalFindings };
-    },
-
-    isScannable(contentType) {
-        if (!contentType) return false;
-        const scannableTypes = ['text/html', 'text/plain', 'text/javascript', 'application/javascript', 'application/json', 'application/xml', 'text/xml'];
-        return scannableTypes.some(type => contentType.toLowerCase().includes(type));
-    }
-};
+// Scanning uses the shared SecurityScannerCore loaded before this background entry.
 
 // ==========================================
 // LIBRARY SCANNER - Vulnerable JS Library Detection (Retire.js-style)
@@ -254,596 +164,967 @@ const SecurityScanner = {
 let libraryFindings = [];
 const MAX_LIBRARY_FINDINGS = 500;
 
+// Runtime vulnerability database refresh. Opt-in (see vulnerabilityDbAutoUpdate);
+// the packaged jsrepository.json stays the offline default.
+const VULNERABILITY_DB_URL =
+  "https://raw.githubusercontent.com/RetireJS/retire.js/refs/heads/master/repository/jsrepository.json";
+const VULNERABILITY_DB_STORAGE_KEY = "vulnerabilityDbCache";
+const VULNERABILITY_DB_AUTO_UPDATE_KEY = "vulnerabilityDbAutoUpdate";
+const VULNERABILITY_DB_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const VULNERABILITY_DB_MAX_CHARS = 8 * 1024 * 1024;
+
 const LibraryScanner = {
-    db: null,
-    compiledPatterns: null,
-    initialized: false,
-    scannedUrls: new Set(), // Cache to avoid re-scanning same URLs
-    
-    // Version placeholder used in jsrepository.json
-    VERSION_PLACEHOLDER: /§§version§§/g,
-    VERSION_PATTERN: '([0-9]+(?:\\.[0-9a-z]+)*(?:[._-](?:alpha|beta|rc|pre|dev|snapshot|final|release|build|M|SP)[._-]?[0-9]*)?)',
-    
-    /**
-     * Initialize the scanner by loading jsrepository.json
-     */
-    async init() {
-        if (this.initialized) return true;
-        
-        try {
-            const url = browser.runtime.getURL('jsrepository.json');
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Failed to load jsrepository.json: ${response.status}`);
-            }
-            this.db = await response.json();
-            this.compiledPatterns = this.compilePatterns();
-            this.initialized = true;
-            console.log(`[LibraryScanner] Initialized with ${Object.keys(this.db).length} libraries`);
-            return true;
-        } catch (err) {
-            console.error('[LibraryScanner] Initialization failed:', err);
-            return false;
-        }
-    },
-    
-    /**
-     * Compile all regex patterns from the database for efficient matching
-     */
-    compilePatterns() {
-        const patterns = {
-            filename: [],
-            uri: [],
-            filecontent: []
-        };
-        
-        for (const [libName, libData] of Object.entries(this.db)) {
-            if (!libData.extractors) continue;
-            
-            // Compile filename patterns
-            if (libData.extractors.filename) {
-                for (const pattern of libData.extractors.filename) {
-                    try {
-                        const regexStr = pattern.replace(this.VERSION_PLACEHOLDER, this.VERSION_PATTERN);
-                        patterns.filename.push({
-                            library: libName,
-                            regex: new RegExp(regexStr, 'i'),
-                            original: pattern
-                        });
-                    } catch (e) {
-                        // Skip invalid patterns
-                    }
-                }
-            }
-            
-            // Compile URI patterns
-            if (libData.extractors.uri) {
-                for (const pattern of libData.extractors.uri) {
-                    try {
-                        const regexStr = pattern.replace(this.VERSION_PLACEHOLDER, this.VERSION_PATTERN);
-                        patterns.uri.push({
-                            library: libName,
-                            regex: new RegExp(regexStr, 'i'),
-                            original: pattern
-                        });
-                    } catch (e) {
-                        // Skip invalid patterns
-                    }
-                }
-            }
-            
-            // Compile filecontent patterns
-            if (libData.extractors.filecontent) {
-                for (const pattern of libData.extractors.filecontent) {
-                    try {
-                        const regexStr = pattern.replace(this.VERSION_PLACEHOLDER, this.VERSION_PATTERN);
-                        patterns.filecontent.push({
-                            library: libName,
-                            regex: new RegExp(regexStr, 'i'),
-                            original: pattern
-                        });
-                    } catch (e) {
-                        // Skip invalid patterns
-                    }
-                }
-            }
-        }
-        
-        return patterns;
-    },
-    
-    /**
-     * Parse version string into comparable components
-     */
-    parseVersion(version) {
-        if (!version) return null;
-        const parts = version.split(/[.\-_]/).map(p => {
-            const num = parseInt(p, 10);
-            return isNaN(num) ? p : num;
-        });
-        return parts;
-    },
-    
-    /**
-     * Compare two versions: returns -1 if a < b, 0 if equal, 1 if a > b
-     */
-    compareVersions(a, b) {
-        const partsA = this.parseVersion(a);
-        const partsB = this.parseVersion(b);
-        
-        if (!partsA || !partsB) return 0;
-        
-        const maxLen = Math.max(partsA.length, partsB.length);
-        
-        for (let i = 0; i < maxLen; i++) {
-            let pa = partsA[i];
-            let pb = partsB[i];
-            
-            // Handle missing parts (treat as 0)
-            if (pa === undefined) pa = 0;
-            if (pb === undefined) pb = 0;
-            
-            // Handle pre-release tags (alpha < beta < rc < release)
-            if (typeof pa === 'string' && typeof pb === 'string') {
-                const order = { 'alpha': 0, 'beta': 1, 'rc': 2, 'pre': 0, 'dev': -1, 'snapshot': -1 };
-                const oa = order[pa.toLowerCase()] ?? 3;
-                const ob = order[pb.toLowerCase()] ?? 3;
-                if (oa !== ob) return oa < ob ? -1 : 1;
-            } else if (typeof pa === 'string') {
-                return -1; // Pre-release is less than release
-            } else if (typeof pb === 'string') {
-                return 1;
-            } else {
-                if (pa < pb) return -1;
-                if (pa > pb) return 1;
-            }
-        }
-        
-        return 0;
-    },
-    
-    /**
-     * Check if a version falls within a vulnerability range
-     */
-    isVersionVulnerable(version, vuln) {
-        // Check "below" constraint
-        if (vuln.below) {
-            if (this.compareVersions(version, vuln.below) >= 0) {
-                return false; // Version is >= below, so not vulnerable
-            }
-        }
-        
-        // Check "atOrAbove" constraint
-        if (vuln.atOrAbove) {
-            if (this.compareVersions(version, vuln.atOrAbove) < 0) {
-                return false; // Version is < atOrAbove, so not vulnerable
-            }
-        }
-        
-        return true;
-    },
-    
-    /**
-     * Get vulnerabilities for a specific library version
-     */
-    getVulnerabilities(library, version) {
-        const libData = this.db[library];
-        if (!libData || !libData.vulnerabilities) return [];
-        
-        const vulns = [];
-        for (const vuln of libData.vulnerabilities) {
-            if (this.isVersionVulnerable(version, vuln)) {
-                vulns.push({
-                    severity: vuln.severity || 'unknown',
-                    summary: vuln.summary || vuln.identifiers?.summary || 'Unknown vulnerability',
-                    cve: vuln.identifiers?.CVE || [],
-                    cwe: vuln.cwe || [],
-                    info: vuln.info || [],
-                    below: vuln.below,
-                    atOrAbove: vuln.atOrAbove
-                });
-            }
-        }
-        
-        return vulns;
-    },
-    
-    /**
-     * Scan URL/filename for library detection
-     */
-    scanUrl(url) {
-        if (!this.initialized || !this.compiledPatterns) return null;
-        
-        // Extract filename from URL
-        const urlObj = new URL(url);
-        const pathname = urlObj.pathname;
-        const filename = pathname.split('/').pop();
-        
-        // Try filename patterns first
-        for (const pattern of this.compiledPatterns.filename) {
-            const match = filename.match(pattern.regex);
-            if (match && match[1]) {
-                return {
-                    library: pattern.library,
-                    version: match[1],
-                    detectedVia: 'filename'
-                };
-            }
-        }
-        
-        // Try URI patterns
-        for (const pattern of this.compiledPatterns.uri) {
-            const match = pathname.match(pattern.regex);
-            if (match && match[1]) {
-                return {
-                    library: pattern.library,
-                    version: match[1],
-                    detectedVia: 'uri'
-                };
-            }
-        }
-        
-        return null;
-    },
-    
-    /**
-     * Scan file content for library signatures
-     */
-    scanContent(content, maxLength = 500000) {
-        if (!this.initialized || !this.compiledPatterns) return [];
-        if (!content || content.length > maxLength) return [];
-        
-        const detected = [];
-        const seenLibraries = new Set();
-        
-        // Only scan first portion of content for performance
-        const scanContent = content.substring(0, maxLength);
-        
-        for (const pattern of this.compiledPatterns.filecontent) {
-            if (seenLibraries.has(pattern.library)) continue;
-            
-            const match = scanContent.match(pattern.regex);
-            if (match && match[1]) {
-                detected.push({
-                    library: pattern.library,
-                    version: match[1],
-                    detectedVia: 'filecontent'
-                });
-                seenLibraries.add(pattern.library);
-            }
-        }
-        
-        return detected;
-    },
-    
-    /**
-     * Main scan function - checks URL and content for vulnerable libraries
-     */
-    scan(url, content = null) {
-        if (!this.initialized) return null;
-        
-        // Check cache
-        if (this.scannedUrls.has(url)) return null;
-        
-        const findings = [];
-        
-        // Scan URL first
-        try {
-            const urlResult = this.scanUrl(url);
-            if (urlResult) {
-                const vulns = this.getVulnerabilities(urlResult.library, urlResult.version);
-                if (vulns.length > 0) {
-                    findings.push({
-                        library: urlResult.library,
-                        version: urlResult.version,
-                        detectedVia: urlResult.detectedVia,
-                        vulnerabilities: vulns,
-                        url: url
-                    });
-                }
-            }
-        } catch (e) {
-            // Invalid URL, skip
-        }
-        
-        // Scan content if provided and URL didn't yield results
-        if (content && findings.length === 0) {
-            const contentResults = this.scanContent(content);
-            for (const result of contentResults) {
-                const vulns = this.getVulnerabilities(result.library, result.version);
-                if (vulns.length > 0) {
-                    findings.push({
-                        library: result.library,
-                        version: result.version,
-                        detectedVia: result.detectedVia,
-                        vulnerabilities: vulns,
-                        url: url
-                    });
-                }
-            }
-        }
-        
-        // Mark URL as scanned
-        this.scannedUrls.add(url);
-        
-        // Limit cache size
-        if (this.scannedUrls.size > 10000) {
-            const iterator = this.scannedUrls.values();
-            for (let i = 0; i < 5000; i++) {
-                this.scannedUrls.delete(iterator.next().value);
-            }
-        }
-        
-        if (findings.length === 0) return null;
-        
-        return {
-            type: 'vulnerableLibraries',
-            url: url,
-            timestamp: new Date().toISOString(),
-            libraries: findings,
-            totalFindings: findings.reduce((acc, f) => acc + f.vulnerabilities.length, 0)
-        };
-    },
-    
-    /**
-     * Check if a URL should be scanned (is a JS file)
-     */
-    isJavaScriptUrl(url) {
-        try {
-            const urlObj = new URL(url);
-            const pathname = urlObj.pathname.toLowerCase();
-            return pathname.endsWith('.js') || pathname.includes('.js?');
-        } catch {
-            return false;
-        }
-    },
-    
-    /**
-     * Clear the URL cache
-     */
-    clearCache() {
-        this.scannedUrls.clear();
+  db: null,
+  compiledPatterns: null,
+  initialized: false,
+  scannedUrls: new Set(), // Cache to avoid re-scanning same URLs
+
+  // Version placeholder used in jsrepository.json
+  VERSION_PLACEHOLDER: /§§version§§/g,
+  VERSION_PATTERN:
+    "([0-9]+(?:\\.[0-9a-z]+)*(?:[._-](?:alpha|beta|rc|pre|preview|dev|snapshot|canary|next|final|ga|release|build|M|SP)[._-]?[0-9]*)?)",
+
+  /**
+   * Initialize the scanner by loading jsrepository.json
+   */
+  async init() {
+    if (this.initialized) return true;
+
+    try {
+      const url = browser.runtime.getURL("jsrepository.json");
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to load jsrepository.json: ${response.status}`);
+      }
+      const bundled = await response.json();
+      const cached = await this.readCachedDatabase();
+      const core = globalThis.EnhancedNetworkTab.LibraryScannerCore;
+      const selected = core.selectRepository(bundled, cached?.data ?? null);
+      const repositoryErrors = core.validateRepository(selected);
+      if (repositoryErrors.length > 0) {
+        console.error("[LibraryScanner] Invalid repository:", repositoryErrors);
+        return false;
+      }
+      this.db = selected;
+      this.dbSource =
+        cached && selected === cached.data ? "downloaded" : "bundled";
+      this.dbFetchedAt =
+        this.dbSource === "downloaded" ? cached.fetchedAt : null;
+      this.compiledPatterns = this.compilePatterns();
+      this.initialized = true;
+      console.log(
+        `[LibraryScanner] Initialized with ${Object.keys(this.db).length} libraries (${this.dbSource})`,
+      );
+      this.maybeAutoUpdate().catch((err) => {
+        console.error(
+          "[LibraryScanner] Automatic database update failed:",
+          err,
+        );
+      });
+      return true;
+    } catch (err) {
+      console.error("[LibraryScanner] Initialization failed:", err);
+      return false;
     }
+  },
+
+  /**
+   * Downloaded databases live in storage.local; the packaged file stays read-only.
+   */
+  async readCachedDatabase() {
+    try {
+      const stored = await browser.storage.local.get(
+        VULNERABILITY_DB_STORAGE_KEY,
+      );
+      const cached = stored[VULNERABILITY_DB_STORAGE_KEY];
+      if (!cached || typeof cached !== "object" || !cached.data) return null;
+      return cached;
+    } catch (err) {
+      console.error("[LibraryScanner] Failed to read cached database:", err);
+      return null;
+    }
+  },
+
+  /**
+   * Fetch the upstream database and adopt it only when it validates.
+   */
+  async updateFromNetwork() {
+    const response = await fetch(VULNERABILITY_DB_URL, { cache: "no-cache" });
+    if (!response.ok) {
+      throw new Error(`Download failed with HTTP ${response.status}`);
+    }
+
+    const text = await response.text();
+    if (text.length > VULNERABILITY_DB_MAX_CHARS) {
+      throw new Error("Downloaded database is unexpectedly large");
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("Downloaded database is not valid JSON");
+    }
+    const repositoryErrors =
+      globalThis.EnhancedNetworkTab.LibraryScannerCore.validateRepository(data);
+    if (repositoryErrors.length > 0) {
+      throw new Error(`Downloaded database is invalid: ${repositoryErrors[0]}`);
+    }
+
+    const fetchedAt = Date.now();
+    await browser.storage.local.set({
+      [VULNERABILITY_DB_STORAGE_KEY]: { fetchedAt, data },
+    });
+
+    this.db = data;
+    this.dbSource = "downloaded";
+    this.dbFetchedAt = fetchedAt;
+    this.compiledPatterns = this.compilePatterns();
+    this.clearCache();
+    console.log(
+      `[LibraryScanner] Database updated from network (${Object.keys(data).length} libraries)`,
+    );
+    return this.status();
+  },
+
+  /**
+   * Automatic refresh runs only when opted in and the database is older than a week.
+   */
+  async maybeAutoUpdate() {
+    if (!(await readVulnerabilityDbAutoUpdate())) return null;
+    const stale =
+      globalThis.EnhancedNetworkTab.LibraryScannerCore.isRepositoryStale(
+        this.dbFetchedAt,
+        VULNERABILITY_DB_MAX_AGE_MS,
+        Date.now(),
+      );
+    if (!stale) return null;
+    return this.updateFromNetwork();
+  },
+
+  status() {
+    return {
+      source: this.dbSource,
+      fetchedAt: this.dbFetchedAt,
+      libraries: this.db ? Object.keys(this.db).length : 0,
+    };
+  },
+
+  /**
+   * Compile all regex patterns from the database for efficient matching
+   */
+  compilePatterns() {
+    const patterns = {
+      filename: [],
+      uri: [],
+      filecontent: [],
+    };
+
+    for (const [libName, libData] of Object.entries(this.db)) {
+      if (!libData.extractors) continue;
+
+      // Compile filename patterns
+      if (libData.extractors.filename) {
+        for (const pattern of libData.extractors.filename) {
+          try {
+            const regexStr = pattern.replace(
+              this.VERSION_PLACEHOLDER,
+              this.VERSION_PATTERN,
+            );
+            patterns.filename.push({
+              library: libName,
+              regex: new RegExp(regexStr, "i"),
+              original: pattern,
+            });
+          } catch {
+            // Skip invalid patterns
+          }
+        }
+      }
+
+      // Compile URI patterns
+      if (libData.extractors.uri) {
+        for (const pattern of libData.extractors.uri) {
+          try {
+            const regexStr = pattern.replace(
+              this.VERSION_PLACEHOLDER,
+              this.VERSION_PATTERN,
+            );
+            patterns.uri.push({
+              library: libName,
+              regex: new RegExp(regexStr, "i"),
+              original: pattern,
+            });
+          } catch {
+            // Skip invalid patterns
+          }
+        }
+      }
+
+      // Compile filecontent patterns
+      if (libData.extractors.filecontent) {
+        for (const pattern of libData.extractors.filecontent) {
+          try {
+            const regexStr = pattern.replace(
+              this.VERSION_PLACEHOLDER,
+              this.VERSION_PATTERN,
+            );
+            patterns.filecontent.push({
+              library: libName,
+              regex: new RegExp(regexStr, "i"),
+              original: pattern,
+            });
+          } catch {
+            // Skip invalid patterns
+          }
+        }
+      }
+    }
+
+    return patterns;
+  },
+
+  /**
+   * Parse version string into comparable components
+   */
+  parseVersion(version) {
+    return globalThis.EnhancedNetworkTab.LibraryScannerCore.tokenizeVersion(
+      version,
+    );
+  },
+
+  /**
+   * Compare two versions: returns -1 if a < b, 0 if equal, 1 if a > b
+   */
+  compareVersions(a, b) {
+    return globalThis.EnhancedNetworkTab.LibraryScannerCore.compareVersions(
+      a,
+      b,
+    );
+  },
+
+  /**
+   * Check if a version falls within a vulnerability range
+   */
+  isVersionVulnerable(version, vuln) {
+    return globalThis.EnhancedNetworkTab.LibraryScannerCore.isVersionVulnerable(
+      version,
+      vuln,
+    );
+  },
+
+  /**
+   * Get vulnerabilities for a specific library version
+   */
+  getVulnerabilities(library, version) {
+    const libData = this.db[library];
+    return globalThis.EnhancedNetworkTab.LibraryScannerCore.getVulnerabilitiesForVersion(
+      libData,
+      version,
+    );
+  },
+
+  /**
+   * Scan URL/filename for library detection
+   */
+  scanUrl(url) {
+    if (!this.initialized || !this.compiledPatterns) return null;
+
+    // Extract filename from URL
+    let urlObj;
+    try {
+      urlObj = new URL(url);
+    } catch {
+      return null;
+    }
+    const pathname = urlObj.pathname;
+    const filename = pathname.split("/").pop();
+
+    // Try filename patterns first
+    for (const pattern of this.compiledPatterns.filename) {
+      const match = filename.match(pattern.regex);
+      if (match && match[1]) {
+        return {
+          library: pattern.library,
+          version: match[1],
+          detectedVia: "filename",
+        };
+      }
+    }
+
+    // Try URI patterns
+    for (const pattern of this.compiledPatterns.uri) {
+      const match = pathname.match(pattern.regex);
+      if (match && match[1]) {
+        return {
+          library: pattern.library,
+          version: match[1],
+          detectedVia: "uri",
+        };
+      }
+    }
+
+    return null;
+  },
+
+  /**
+   * Scan file content for library signatures
+   */
+  scanContent(content, maxLength = 500000) {
+    if (!this.initialized || !this.compiledPatterns) return [];
+    if (!content || content.length > maxLength) return [];
+
+    const detected = [];
+    const seenLibraries = new Set();
+
+    // Only scan first portion of content for performance
+    const scanContent = content.substring(0, maxLength);
+
+    for (const pattern of this.compiledPatterns.filecontent) {
+      if (seenLibraries.has(pattern.library)) continue;
+
+      const match = scanContent.match(pattern.regex);
+      if (match && match[1]) {
+        detected.push({
+          library: pattern.library,
+          version: match[1],
+          detectedVia: "filecontent",
+        });
+        seenLibraries.add(pattern.library);
+      }
+    }
+
+    return detected;
+  },
+
+  /**
+   * Main scan function - checks URL and content for vulnerable libraries
+   */
+  scan(url, content = null) {
+    if (!this.initialized) return null;
+
+    // Check cache
+    if (this.scannedUrls.has(url)) return null;
+
+    const findings = [];
+
+    // Scan URL first
+    try {
+      const urlResult = this.scanUrl(url);
+      if (urlResult) {
+        const vulns = this.getVulnerabilities(
+          urlResult.library,
+          urlResult.version,
+        );
+        if (vulns.length > 0) {
+          findings.push({
+            library: urlResult.library,
+            version: urlResult.version,
+            detectedVia: urlResult.detectedVia,
+            vulnerabilities: vulns,
+            url: url,
+          });
+        }
+      }
+    } catch {
+      // Invalid URL, skip
+    }
+
+    // Scan content if provided and URL didn't yield results
+    if (content && findings.length === 0) {
+      const contentResults = this.scanContent(content);
+      for (const result of contentResults) {
+        const vulns = this.getVulnerabilities(result.library, result.version);
+        if (vulns.length > 0) {
+          findings.push({
+            library: result.library,
+            version: result.version,
+            detectedVia: result.detectedVia,
+            vulnerabilities: vulns,
+            url: url,
+          });
+        }
+      }
+    }
+
+    // Mark URL as scanned
+    this.scannedUrls.add(url);
+
+    // Limit cache size
+    if (this.scannedUrls.size > 10000) {
+      const iterator = this.scannedUrls.values();
+      for (let i = 0; i < 5000; i++) {
+        this.scannedUrls.delete(iterator.next().value);
+      }
+    }
+
+    if (findings.length === 0) return null;
+
+    return {
+      type: "vulnerableLibraries",
+      url: url,
+      timestamp: new Date().toISOString(),
+      libraries: findings,
+      totalFindings: findings.reduce(
+        (acc, f) => acc + f.vulnerabilities.length,
+        0,
+      ),
+    };
+  },
+
+  /**
+   * Check if a URL should be scanned (is a JS file)
+   */
+  isJavaScriptUrl(url) {
+    try {
+      const urlObj = new URL(url);
+      const pathname = urlObj.pathname.toLowerCase();
+      return pathname.endsWith(".js") || pathname.includes(".js?");
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Clear the URL cache
+   */
+  clearCache() {
+    this.scannedUrls.clear();
+  },
 };
 
 // Initialize LibraryScanner on startup
-LibraryScanner.init().then(success => {
-    if (success) {
-        console.log('[LibraryScanner] Ready for scanning');
-    }
+LibraryScanner.init().then((success) => {
+  if (success) {
+    console.log("[LibraryScanner] Ready for scanning");
+  }
 });
 
 // Update badge with findings count (includes both security and library findings)
 function updateBadge() {
-    const securityCount = securityFindings.reduce((acc, f) => acc + f.totalFindings, 0);
-    const libraryCount = libraryFindings.reduce((acc, f) => acc + f.totalFindings, 0);
-    const totalCount = securityCount + libraryCount;
-    browser.browserAction.setBadgeText({ text: totalCount > 0 ? String(totalCount) : '' });
-    browser.browserAction.setBadgeBackgroundColor({ color: '#dc3545' });
+  const securityCount = securityFindings.reduce(
+    (acc, finding) =>
+      acc + (finding.significantFindings ?? finding.totalFindings ?? 0),
+    0,
+  );
+  const libraryCount = libraryFindings.reduce(
+    (acc, f) => acc + f.totalFindings,
+    0,
+  );
+  const totalCount = securityCount + libraryCount;
+  browser.browserAction.setBadgeText({
+    text: totalCount > 0 ? String(totalCount) : "",
+  });
+  browser.browserAction.setBadgeBackgroundColor({ color: "#dc3545" });
 }
 
 // Clear security findings
-function clearSecurityFindings() {
-    securityFindings = [];
-    browser.storage.local.set({ securityFindings: [] });
-    updateBadge();
+function findingBelongsToTab(finding, tabId) {
+  if (!finding || tabId === null) return tabId === null;
+  if (finding.tabId === tabId) return true;
+  return requests.get(finding.requestId)?.tabId === tabId;
+}
+
+let findingsStorageTimer = null;
+function sanitizeSecurityFindingsForStorage() {
+  return securityFindings.map((finding) =>
+    FindingPrivacy.sanitizeSecurityFinding(finding),
+  );
+}
+
+function persistSecurityFindingsNow() {
+  return browser.storage.local.set({
+    securityFindings: sanitizeSecurityFindingsForStorage(),
+  });
+}
+
+function scheduleFindingsPersistence() {
+  if (findingsStorageTimer) clearTimeout(findingsStorageTimer);
+  findingsStorageTimer = setTimeout(() => {
+    findingsStorageTimer = null;
+    browser.storage.local
+      .set({
+        securityFindings: sanitizeSecurityFindingsForStorage(),
+        libraryFindings,
+      })
+      .catch((error) => {
+        console.error("Failed to persist findings:", error);
+      });
+  }, 250);
+}
+
+function clearSecurityFindings(tabId = null) {
+  securityFindings =
+    tabId === null
+      ? []
+      : securityFindings.filter(
+          (finding) => !findingBelongsToTab(finding, tabId),
+        );
+  persistSecurityFindingsNow().catch((error) => {
+    console.error("Failed to persist cleared security findings:", error);
+  });
+  updateBadge();
 }
 
 // Clear library findings
-function clearLibraryFindings() {
-    libraryFindings = [];
-    LibraryScanner.clearCache();
-    browser.storage.local.set({ libraryFindings: [] });
-    updateBadge();
+function clearLibraryFindings(tabId = null) {
+  libraryFindings =
+    tabId === null
+      ? []
+      : libraryFindings.filter(
+          (finding) => !findingBelongsToTab(finding, tabId),
+        );
+  LibraryScanner.clearCache();
+  browser.storage.local.set({ libraryFindings });
+  updateBadge();
 }
 
-// Load saved settings from storage on startup
-browser.storage.local.get(['interceptSettings', 'captureEnabled', 'matchReplaceRules', 'securityFindings', 'libraryFindings']).then((result) => {
-  if (result.interceptSettings) {
-    interceptSettings = { ...interceptSettings, ...result.interceptSettings };
+// Load saved settings and one-time promotion state on startup.
+const settingsLoadPromise = browser.storage.local
+  .get([
+    "interceptSettings",
+    "matchReplaceRules",
+    "securityFindings",
+    "libraryFindings",
+    "pendingPromotionId",
+    "seenPromotionIds",
+  ])
+  .then((result) => {
+    if (result.interceptSettings) {
+      interceptSettings = { ...interceptSettings, ...result.interceptSettings };
+    }
+    interceptSettings.modifiedRequestAction =
+      RequestInterception.normalizeModifiedRequestAction(
+        interceptSettings.modifiedRequestAction,
+      );
+    if (
+      interceptSettings.modifiedRequestAction ===
+      RequestInterception.MODIFIED_REQUEST_ACTIONS.CANCEL_AND_SEND
+    ) {
+      interceptSettings.useEarlyInterception = false;
+    }
+    if (result.matchReplaceRules) {
+      matchReplaceRules = sanitizeMatchReplaceRules(result.matchReplaceRules);
+    }
+    if (result.securityFindings) {
+      const now = Date.now();
+      securityFindings = result.securityFindings.filter((finding) => {
+        const timestamp = Date.parse(finding.timestamp || "");
+        return (
+          Number.isFinite(timestamp) &&
+          now - timestamp <= SECURITY_FINDING_TTL_MS
+        );
+      });
+      if (securityFindings.length !== result.securityFindings.length) {
+        persistSecurityFindingsNow().catch((error) => {
+          console.error("Failed to remove expired security findings:", error);
+        });
+      }
+    }
+    if (result.libraryFindings) {
+      libraryFindings = result.libraryFindings;
+    }
+    pendingPromotionId = result.pendingPromotionId || null;
+    seenPromotionIds = Array.isArray(result.seenPromotionIds)
+      ? result.seenPromotionIds
+      : [];
+    updateBadge();
+  })
+  .catch((err) => {
+    console.error("Failed to load settings from storage:", err);
+  });
+
+function queueExperimentalPromotion(details) {
+  return settingsLoadPromise.then(() => {
+    if (
+      !RequestInterception.shouldQueuePromotion(
+        details,
+        seenPromotionIds,
+        RequestInterception.PROMOTION_ID,
+      )
+    ) {
+      return false;
+    }
+
+    pendingPromotionId = RequestInterception.PROMOTION_ID;
+    return browser.storage.local.set({ pendingPromotionId }).then(() => true);
+  });
+}
+
+// Vulnerability database refresh is opt-in; the packaged copy is the default.
+async function readVulnerabilityDbAutoUpdate() {
+  try {
+    const stored = await browser.storage.local.get(
+      VULNERABILITY_DB_AUTO_UPDATE_KEY,
+    );
+    return stored[VULNERABILITY_DB_AUTO_UPDATE_KEY] === true;
+  } catch (error) {
+    console.error("Failed to read vulnerability database settings:", error);
+    return false;
   }
-  if (result.captureEnabled !== undefined) {
-    captureEnabled = result.captureEnabled;
-    updateIcon();
-  }
-  if (result.matchReplaceRules) {
-    matchReplaceRules = result.matchReplaceRules;
-  }
-  if (result.securityFindings) {
-    securityFindings = result.securityFindings;
-  }
-  if (result.libraryFindings) {
-    libraryFindings = result.libraryFindings;
-  }
-  updateBadge();
-}).catch((err) => {
-  console.error('Failed to load settings from storage:', err);
-});
+}
+
+function reportVulnerabilityDbStatus(port, errorMessage = null) {
+  LibraryScanner.init()
+    .then(() => {
+      safePortMessage(port, {
+        type: "vulnerabilityDbStatus",
+        status: { ...LibraryScanner.status(), error: errorMessage },
+      });
+    })
+    .catch((error) => {
+      console.error("Failed to report vulnerability database status:", error);
+    });
+}
+
+function refreshVulnerabilityDb(port, force) {
+  LibraryScanner.init()
+    .then(() =>
+      force
+        ? LibraryScanner.updateFromNetwork()
+        : LibraryScanner.maybeAutoUpdate(),
+    )
+    .then((result) => {
+      safePortMessage(port, {
+        type: "vulnerabilityDbStatus",
+        status: { ...LibraryScanner.status(), refreshed: Boolean(result) },
+      });
+    })
+    .catch((error) => {
+      console.error("Vulnerability database update failed:", error);
+      reportVulnerabilityDbStatus(port, error.message || String(error));
+    });
+}
+
+function claimExperimentalPromotion(port) {
+  return settingsLoadPromise
+    .then(async () => {
+      const claim = RequestInterception.claimPromotionState(
+        pendingPromotionId,
+        seenPromotionIds,
+        interceptSettings.modifiedRequestAction,
+        RequestInterception.PROMOTION_ID,
+      );
+      pendingPromotionId = claim.pendingPromotionId;
+      seenPromotionIds = claim.seenPromotionIds;
+      await browser.storage.local.set({
+        pendingPromotionId,
+        seenPromotionIds,
+      });
+      port.postMessage({
+        type: "experimentalPromotionClaimed",
+        promotion: claim.promotion,
+      });
+    })
+    .catch((error) => {
+      console.error("Failed to claim experimental promotion:", error);
+      try {
+        port.postMessage({
+          type: "experimentalPromotionClaimed",
+          promotion: null,
+        });
+      } catch {}
+    });
+}
 
 // Handle extension installation and version updates
 browser.runtime.onInstalled.addListener((details) => {
-  if (details.reason === 'update' || details.reason === 'install') {
+  if (details.reason === "update" || details.reason === "install") {
     const currentVer = browser.runtime.getManifest().version;
-    console.log(`[Extension Lifecycle] ${details.reason} to v${currentVer} (previous: ${details.previousVersion || 'N/A'})`);
+    console.log(
+      `[Extension Lifecycle] ${details.reason} to v${currentVer} (previous: ${details.previousVersion || "N/A"})`,
+    );
     try {
-      localStorage.removeItem('hiddenTypes');
-    } catch(e) {}
+      localStorage.removeItem("hiddenTypes");
+    } catch {}
     browser.storage.local.set({ lastMigratedVersion: currentVer });
   }
+
+  queueExperimentalPromotion(details).catch((error) => {
+    console.error("Failed to queue experimental promotion:", error);
+  });
 });
 
 browser.tabs.onActivated.addListener((activeInfo) => {
   activeTabId = activeInfo.tabId;
-  updateIcon();
+  updateIcon(activeInfo.tabId);
+});
+
+browser.tabs.onRemoved.addListener((tabId) => {
+  releasePendingInterceptions(tabId);
+  clearRequestsForTab(tabId);
+  ruleRedirects.clearTab(tabId);
+  tabSessions.remove(tabId);
+  inspectedTabs.delete(tabId);
 });
 
 browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
   if (tabs[0]) {
     activeTabId = tabs[0].id;
+    updateIcon(activeTabId);
   }
 });
 
-browser.browserAction.onClicked.addListener(() => {
-  captureEnabled = !captureEnabled;
-  // Save capture state to storage
-  browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
-    console.error('Failed to save capture state:', err);
-  });
-  updateIcon();
-  notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
+browser.browserAction.onClicked.addListener((tab) => {
+  if (!globalThis.EnhancedNetworkTab.TabSessionCore.isValidTabId(tab?.id))
+    return;
+  const currentState = tabSessions.get(tab.id, true);
+  setTabCaptureEnabled(tab.id, !currentState.captureEnabled);
 });
-
 
 browser.runtime.onInstalled.addListener(() => {
   browser.contextMenus.create({
     id: "toggle-capture",
     title: "Toggle Capture",
-    contexts: ["all"]
+    contexts: ["all"],
   });
   browser.contextMenus.create({
     id: "toggle-intercept",
     title: "Toggle Intercept",
-    contexts: ["all"]
+    contexts: ["all"],
   });
   browser.contextMenus.create({
     id: "send-to-decoder",
     title: "Send to Decoder",
-    contexts: ["selection"]
+    contexts: ["selection"],
   });
 });
 
 browser.contextMenus.onClicked.addListener((info, tab) => {
+  if (!globalThis.EnhancedNetworkTab.TabSessionCore.isValidTabId(tab?.id))
+    return;
+
   if (info.menuItemId === "toggle-capture") {
-    captureEnabled = !captureEnabled;
-    if (!captureEnabled && interceptEnabled) {
-      interceptEnabled = false;
-      notifyDevTools({ type: 'interceptStateChanged', enabled: false });
-    }
-    // Save capture state to storage
-    browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
-      console.error('Failed to save capture state:', err);
-    });
-    updateIcon();
-    notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
+    const currentState = tabSessions.get(tab.id, true);
+    setTabCaptureEnabled(tab.id, !currentState.captureEnabled);
   } else if (info.menuItemId === "toggle-intercept") {
-    interceptEnabled = !interceptEnabled;
-    if (interceptEnabled && !captureEnabled) {
-      captureEnabled = true;
-      browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
-        console.error('Failed to save capture state:', err);
-      });
-      notifyDevTools({ type: 'captureStateChanged', enabled: true });
-    }
-    updateIcon();
-    notifyDevTools({ type: 'interceptStateChanged', enabled: interceptEnabled });
+    const currentState = tabSessions.get(tab.id, true);
+    setTabInterceptEnabled(tab.id, !currentState.interceptEnabled);
   } else if (info.menuItemId === "send-to-decoder") {
-    notifyDevTools({ 
-      type: 'sendToDecoder', 
-      text: info.selectionText 
-    });
+    notifyDevTools(
+      {
+        type: "sendToDecoder",
+        text: info.selectionText,
+      },
+      tab.id,
+    );
   }
 });
 
-function updateIcon() {
-  const iconPath = captureEnabled ? {
-    16: 'icons/icon16.png',
-    32: 'icons/icon32.png',
-    48: 'icons/icon48.png',
-    128: 'icons/icon128.png'
-  } : {
-    16: 'icons/icon16.png',
-    32: 'icons/icon32.png',
-    48: 'icons/icon48.png',
-    128: 'icons/icon128.png'
+function setTabCaptureEnabled(tabId, enabled) {
+  const previousState = { ...tabSessions.get(tabId, true) };
+  const state = tabSessions.setCapture(tabId, enabled);
+
+  if (!state.captureEnabled && previousState.interceptEnabled) {
+    releasePendingInterceptions(tabId);
+    notifyDevTools({ type: "interceptStateChanged", enabled: false }, tabId);
+  }
+
+  updateIcon(tabId);
+  notifyDevTools(
+    { type: "captureStateChanged", enabled: state.captureEnabled },
+    tabId,
+  );
+  return state;
+}
+
+function setTabInterceptEnabled(tabId, enabled) {
+  const previousState = { ...tabSessions.get(tabId, true) };
+  const state = tabSessions.setIntercept(tabId, enabled);
+
+  if (
+    !state.interceptEnabled &&
+    (previousState.interceptEnabled || enabled === false)
+  ) {
+    releasePendingInterceptions(tabId);
+  }
+
+  if (state.captureEnabled !== previousState.captureEnabled) {
+    notifyDevTools(
+      { type: "captureStateChanged", enabled: state.captureEnabled },
+      tabId,
+    );
+  }
+
+  updateIcon(tabId);
+  notifyDevTools(
+    { type: "interceptStateChanged", enabled: state.interceptEnabled },
+    tabId,
+  );
+  return state;
+}
+
+function updateIcon(tabId = activeTabId) {
+  if (!globalThis.EnhancedNetworkTab.TabSessionCore.isValidTabId(tabId)) return;
+  const state = tabSessions.get(tabId, false) || {
+    captureEnabled: false,
+    interceptEnabled: false,
   };
-  
-  browser.browserAction.setIcon({ path: iconPath });
-  browser.browserAction.setTitle({ 
-    title: `Security Proxy - ${captureEnabled ? 'Capturing' : 'Idle'}${interceptEnabled ? ' (Intercepting)' : ''}`
+  const iconPath = state.captureEnabled
+    ? {
+        16: "icons/icon16.png",
+        32: "icons/icon32.png",
+        48: "icons/icon48.png",
+        128: "icons/icon128.png",
+      }
+    : {
+        16: "icons/icon16.png",
+        32: "icons/icon32.png",
+        48: "icons/icon48.png",
+        128: "icons/icon128.png",
+      };
+
+  browser.browserAction.setIcon({ path: iconPath, tabId });
+  browser.browserAction.setTitle({
+    tabId,
+    title: `Security Proxy - ${state.captureEnabled ? "Capturing" : "Idle"}${state.interceptEnabled ? " (Intercepting)" : ""}`,
   });
 }
 
-function getRequestBody(details) {
-  if (details.requestBody) {
-    if (details.requestBody.formData) {
-      return JSON.stringify(details.requestBody.formData);
-    } else if (details.requestBody.raw) {
-      const decoder = new TextDecoder('utf-8');
-      return details.requestBody.raw.map(data => decoder.decode(new Uint8Array(data.bytes))).join('');
-    }
-  }
-  return '';
+function getRequestBodyModel(details) {
+  return HttpModel.createRequestBodyModel(
+    details.requestBody,
+    EDITABLE_RESPONSE_LIMIT,
+  );
 }
 
 function shouldInterceptRequest(details) {
   let shouldIntercept = false;
-  
-  if (interceptSettings.includeGET && details.method === 'GET') {
+
+  if (interceptSettings.includeGET && details.method === "GET") {
     shouldIntercept = true;
   } else if (interceptSettings.methods.includes(details.method)) {
     shouldIntercept = true;
   }
-  
+
   if (!shouldIntercept) {
     return false;
   }
-  
+
   if (interceptSettings.excludeExtensions.length > 0) {
-    const url = new URL(details.url);
+    let url;
+    try {
+      url = new URL(details.url);
+    } catch {
+      return false;
+    }
     const pathname = url.pathname.toLowerCase();
-    const hasExcludedExtension = interceptSettings.excludeExtensions.some(ext => {
-      return pathname.endsWith('.' + ext.toLowerCase()) || 
-             pathname.includes('.' + ext.toLowerCase() + '?') ||
-             pathname.includes('.' + ext.toLowerCase() + '#');
-    });
-    
+    const hasExcludedExtension = interceptSettings.excludeExtensions.some(
+      (ext) => {
+        return (
+          pathname.endsWith("." + ext.toLowerCase()) ||
+          pathname.includes("." + ext.toLowerCase() + "?") ||
+          pathname.includes("." + ext.toLowerCase() + "#")
+        );
+      },
+    );
+
     if (hasExcludedExtension) {
       return false;
     }
   }
-  
+
   if (interceptSettings.urlPatterns.length > 0) {
-    const matchesIncludePattern = interceptSettings.urlPatterns.some(pattern => {
-      try {
-        const regex = new RegExp(pattern, 'i');
-        return regex.test(details.url);
-      } catch (e) {
-        console.warn('Invalid regex pattern:', pattern);
-        return false;
-      }
-    });
-    
+    const matchesIncludePattern = interceptSettings.urlPatterns.some(
+      (pattern) => {
+        try {
+          const regex = new RegExp(pattern, "i");
+          return regex.test(details.url);
+        } catch {
+          console.warn("Invalid regex pattern:", pattern);
+          return false;
+        }
+      },
+    );
+
     if (!matchesIncludePattern) {
       return false;
     }
   }
-  
+
   if (interceptSettings.excludePatterns.length > 0) {
-    const matchesExcludePattern = interceptSettings.excludePatterns.some(pattern => {
-      try {
-        const regex = new RegExp(pattern, 'i');
-        return regex.test(details.url);
-      } catch (e) {
-        console.warn('Invalid regex pattern:', pattern);
-        return false;
-      }
-    });
-    
+    const matchesExcludePattern = interceptSettings.excludePatterns.some(
+      (pattern) => {
+        try {
+          const regex = new RegExp(pattern, "i");
+          return regex.test(details.url);
+        } catch {
+          console.warn("Invalid regex pattern:", pattern);
+          return false;
+        }
+      },
+    );
+
     if (matchesExcludePattern) {
       return false;
     }
   }
-  
+
   return true;
+}
+
+function requestHasPendingWork(requestId) {
+  for (const pending of pendingRequests.values()) {
+    if (pending.id === requestId) return true;
+  }
+  for (const pending of pendingResponses.values()) {
+    if (pending.requestId === requestId) return true;
+  }
+  for (const pending of pendingReplacementJobs.values()) {
+    if (pending.requestId === requestId) return true;
+  }
+  return pendingResponseHeaderIntercepts.has(requestId);
+}
+
+function removeRequestRecord(requestId) {
+  const request = requests.get(requestId);
+  if (!request) return false;
+
+  requests.delete(requestId);
+  replacementResults.delete(requestId);
+  requestIdMap.delete(request.originalRequestId);
+
+  const previousSecurityCount = securityFindings.length;
+  const previousLibraryCount = libraryFindings.length;
+  securityFindings = securityFindings.filter(
+    (finding) => finding.requestId !== requestId,
+  );
+  libraryFindings = libraryFindings.filter(
+    (finding) => finding.requestId !== requestId,
+  );
+
+  if (securityFindings.length !== previousSecurityCount) {
+    scheduleFindingsPersistence();
+  }
+  if (libraryFindings.length !== previousLibraryCount) {
+    scheduleFindingsPersistence();
+  }
+  return true;
+}
+
+function enforceRequestLimit(tabId, protectedRequestId = null) {
+  const evictionIds =
+    globalThis.EnhancedNetworkTab.TabSessionCore.selectRequestIdsForEviction(
+      Array.from(requests.entries()),
+      tabId,
+      MAX_REQUESTS_PER_TAB,
+      (requestId) =>
+        requestId === protectedRequestId || requestHasPendingWork(requestId),
+    );
+
+  for (const requestId of evictionIds) {
+    const request = requests.get(requestId);
+    if (removeRequestRecord(requestId) && request) {
+      notifyDevTools({ type: "requestEvicted", requestId }, request.tabId);
+    }
+  }
 }
 
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
-    // Check if capture is enabled and the request is from an inspected tab or active tab
-    const isInspectedTab = inspectedTabs.has(details.tabId);
-    const isActiveTab = details.tabId === activeTabId;
-    
-    if (!captureEnabled || details.tabId === -1 || (!isInspectedTab && !isActiveTab)) {
+    const tabState = tabSessions.get(details.tabId, false);
+
+    if (!tabState?.captureEnabled || details.tabId === -1) {
       return {};
     }
 
@@ -851,43 +1132,49 @@ browser.webRequest.onBeforeRequest.addListener(
     if (interceptSettings.scopeEnabled) {
       // 1. Check Include Patterns (Whitelist)
       if (interceptSettings.scopePatterns.length > 0) {
-        const isInScope = interceptSettings.scopePatterns.some(pattern => {
+        const isInScope = interceptSettings.scopePatterns.some((pattern) => {
           try {
-            const regex = new RegExp(pattern, 'i');
+            const regex = new RegExp(pattern, "i");
             return regex.test(details.url);
-          } catch (e) {
-            console.warn('Invalid regex pattern:', pattern);
+          } catch {
+            console.warn("Invalid regex pattern:", pattern);
             return false;
           }
         });
-        
+
         if (!isInScope) {
           return {};
         }
       }
 
       // 2. Check Exclude Patterns (Blacklist)
-      if (interceptSettings.scopeExcludePatterns && interceptSettings.scopeExcludePatterns.length > 0) {
-        const isExcluded = interceptSettings.scopeExcludePatterns.some(pattern => {
-          try {
-            const regex = new RegExp(pattern, 'i');
-            return regex.test(details.url);
-          } catch (e) {
-            console.warn('Invalid regex pattern:', pattern);
-            return false;
-          }
-        });
-        
+      if (
+        interceptSettings.scopeExcludePatterns &&
+        interceptSettings.scopeExcludePatterns.length > 0
+      ) {
+        const isExcluded = interceptSettings.scopeExcludePatterns.some(
+          (pattern) => {
+            try {
+              const regex = new RegExp(pattern, "i");
+              return regex.test(details.url);
+            } catch {
+              console.warn("Invalid regex pattern:", pattern);
+              return false;
+            }
+          },
+        );
+
         if (isExcluded) {
           return {};
         }
       }
     }
-    
+
     const requestId = `${details.requestId}_${requestIdCounter++}`;
     requestIdMap.set(details.requestId, requestId);
-    
+
     // Create request data object early to track modification
+    const requestBodyModel = getRequestBodyModel(details);
     const requestData = {
       id: requestId,
       originalRequestId: details.requestId,
@@ -895,610 +1182,740 @@ browser.webRequest.onBeforeRequest.addListener(
       url: details.url,
       method: details.method,
       type: details.type,
-      requestHeaders: {},
-      requestBody: getRequestBody(details),
+      requestHeaders: [],
+      requestBody: requestBodyModel.text,
+      requestBodyModel,
       requestSize: 0,
-      responseHeaders: {},
-      responseBody: '',
+      responseHeaders: [],
+      responseBody: "",
       responseSize: 0,
       statusCode: null,
-      statusLine: '',
+      statusLine: "",
       tabId: details.tabId,
       completed: false,
       intercepted: false,
+      interceptionHandled: false,
       shouldIntercept: false,
       wasModified: false,
-      autoModified: false
+      autoModified: false,
     };
 
     // Apply match & replace rules for onBeforeRequest (URL and Body)
     let modifiedDetails = { ...details };
     let wasModified = false;
-    let bodyModified = false;
     let urlModified = false;
-    let modifiedBody = requestData.requestBody;
-    
+
+    ruleRedirects.begin(details.requestId, details.url, details.tabId);
     if (matchReplaceRules.length > 0) {
-        for (const rule of matchReplaceRules) {
-            if (!rule.enabled) continue;
-            
-            if (rule.target === 'url') {
-                const newUrl = applyRuleReplacement(modifiedDetails.url, rule);
-                if (newUrl !== modifiedDetails.url) {
-                    modifiedDetails.url = newUrl;
-                    wasModified = true;
-                    urlModified = true;
-                }
-            } else if (rule.target === 'body') {
-                const newBody = applyRuleReplacement(modifiedBody, rule);
-                if (newBody !== modifiedBody) {
-                    modifiedBody = newBody;
-                    wasModified = true;
-                    bodyModified = true;
-                }
+      for (const [ruleIndex, rule] of matchReplaceRules.entries()) {
+        if (!rule.enabled) continue;
+
+        if (rule.target === "url") {
+          const newUrl = applyRuleReplacement(modifiedDetails.url, rule);
+          if (newUrl !== modifiedDetails.url) {
+            const validation = RequestInterception.validateEditedUrl({
+              url: newUrl,
+            });
+            if (!validation.valid) {
+              console.warn(
+                "Skipped URL Match & Replace result:",
+                validation.errors[0]?.message,
+              );
+              continue;
             }
+            const redirectDecision = ruleRedirects.tryRedirect(
+              details.requestId,
+              `url-rule-${ruleIndex}`,
+              modifiedDetails.url,
+              newUrl,
+              details.tabId,
+            );
+            if (!redirectDecision.allowed) continue;
+
+            modifiedDetails.url = newUrl;
+            wasModified = true;
+            urlModified = true;
+          }
         }
+      }
     }
 
     if (wasModified) {
-        requestData.wasModified = true;
-        requestData.autoModified = true;
-        
-        // Priority 1: URL Redirection
-        if (urlModified) {
-            requestData.originalUrl = details.url;
-            requestData.modifiedUrl = modifiedDetails.url;
-            requestData.statusLine = 'Auto-Redirected (Rule)';
-            requestData.statusCode = 307; // Internal redirect code
-            requestData.completed = true;
-            
-            requests.set(requestId, requestData);
-            
-            notifyDevTools({
-                type: 'newRequest',
-                request: requestData
-            });
+      requestData.wasModified = true;
+      requestData.autoModified = true;
 
-            return { redirectUrl: modifiedDetails.url };
-        }
-        
-        // Priority 2: Body Modification (Wait for headers)
-        if (bodyModified) {
-            // Store for onBeforeSendHeaders where we can get headers and cancel/resend
-            pendingBodyModifications.set(details.requestId, {
-                modifiedBody: modifiedBody,
-                requestData: requestData
-            });
-            
-            // We don't cancel here anymore. We wait for headers.
-            // We still update the requestData for the UI to know it's being processed
-            requestData.statusLine = 'Pending Body Mod...';
-            requests.set(requestId, requestData);
-            notifyDevTools({ type: 'newRequest', request: requestData });
-            
-            return {};
-        }
+      // Priority 1: URL Redirection
+      if (urlModified) {
+        requestData.originalUrl = details.url;
+        requestData.modifiedUrl = modifiedDetails.url;
+        requestData.statusLine = "Auto-Redirected (Rule)";
+        requestData.statusCode = 307; // Internal redirect code
+        requestData.completed = true;
+
+        requests.set(requestId, requestData);
+        enforceRequestLimit(details.tabId, requestId);
+
+        notifyDevTools({
+          type: "newRequest",
+          request: requestData,
+        });
+
+        return { redirectUrl: modifiedDetails.url };
+      }
     }
-    
-    if (interceptEnabled && shouldInterceptRequest(details)) {
+
+    if (tabState.interceptEnabled && shouldInterceptRequest(details)) {
       requestData.shouldIntercept = true;
       requestData.intercepted = true;
-      requestData.statusLine = 'Intercepted';
-      
+      requestData.statusLine = "Intercepted";
+
       if (interceptSettings.interceptResponses) {
         interceptedRequestIds.add(details.requestId);
         interceptedResponseTabIds.set(details.requestId, details.tabId);
       }
-      
+
       requests.set(requestId, requestData);
-      
-      if (requests.size > MAX_REQUESTS) {
-        const oldestKey = requests.keys().next().value;
-        const oldRequest = requests.get(oldestKey);
-        if (oldRequest) {
-          requestIdMap.delete(oldRequest.originalRequestId);
-        }
-        requests.delete(oldestKey);
-      }
-      
+      enforceRequestLimit(details.tabId, requestId);
+
       notifyDevTools({
-        type: 'newRequest',
-        request: requestData
+        type: "newRequest",
+        request: requestData,
       });
 
       if (interceptSettings.useEarlyInterception) {
         return new Promise((resolve) => {
-           const pendingData = {
-             ...requestData,
-             resolve: resolve,
-             originalRequestId: details.requestId,
-             stage: 'onBeforeRequest'
-           };
-           pendingRequests.set(details.requestId, pendingData);
-           
-           notifyDevTools({
-             type: 'interceptRequest',
-             request: {
-                 ...requestData,
-                 stage: 'onBeforeRequest'
-             }
-           });
+          const pendingData = {
+            ...requestData,
+            resolve: resolve,
+            originalRequestId: details.requestId,
+            createdAt: Date.now(),
+            stage: "onBeforeRequest",
+          };
+          pendingRequests.set(details.requestId, pendingData);
+          armPendingTimeout(pendingData, REQUEST_INTERCEPT_TIMEOUT_MS, () => {
+            if (pendingRequests.get(details.requestId) !== pendingData) return;
+            resolvePendingRequest(
+              details.requestId,
+              pendingData,
+              {},
+              "timeout",
+            );
+          });
+
+          notifyDevTools({
+            type: "interceptRequest",
+            request: {
+              ...requestData,
+              stage: "onBeforeRequest",
+            },
+          });
         });
       }
 
       return {};
     }
-    
+
     requests.set(requestId, requestData);
-    
-    if (requests.size > MAX_REQUESTS) {
-      const oldestKey = requests.keys().next().value;
-      const oldRequest = requests.get(oldestKey);
-      if (oldRequest) {
-        requestIdMap.delete(oldRequest.originalRequestId);
-      }
-      requests.delete(oldestKey);
-    }
-    
+    enforceRequestLimit(details.tabId, requestId);
+
     notifyDevTools({
-      type: 'newRequest',
-      request: requestData
+      type: "newRequest",
+      request: requestData,
     });
-    
+
     return {};
   },
   { urls: ["<all_urls>"] },
-  ["blocking", "requestBody"]
+  ["blocking", "requestBody"],
 );
 
 function applyHeaderRules(originalHeaders) {
-    if (!matchReplaceRules.length) return { headers: originalHeaders, modified: false };
-
-    let headersModified = false;
-    let newHeaders = originalHeaders.map(header => {
-        let headerModified = false;
-        let newValue = header.value;
-        
-        for (const rule of matchReplaceRules) {
-            if (!rule.enabled || rule.target !== 'headers') continue;
-            
-            const replaced = applyRuleReplacement(newValue, rule);
-            if (replaced !== newValue) {
-                newValue = replaced;
-                headerModified = true;
-            }
-        }
-        
-        if (headerModified) {
-            headersModified = true;
-            return { name: header.name, value: newValue };
-        }
-        return header;
-    });
-    
-    return { headers: newHeaders, modified: headersModified };
+  return MatchReplace.applyHeaderRules(originalHeaders, matchReplaceRules);
 }
 
 browser.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
-    // Check if this is a Repeater request (from background script, identified by marker header)
-    const repeaterIdHeader = details.requestHeaders.find(h => h.name.toLowerCase() === 'x-repeater-id');
-    if (repeaterIdHeader) {
-      const repeaterId = repeaterIdHeader.value;
-      const pendingRepeater = pendingRepeaterRequests.get(repeaterId);
-      
-      if (pendingRepeater) {
-        // Build new headers array from user's desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
-        const newHeaders = [];
-        
-        for (const [name, value] of Object.entries(pendingRepeater.headers)) {
-          // Skip the marker header - we don't want to send it to the server
-          if (name.toLowerCase() !== 'x-repeater-id') {
-            newHeaders.push({ name, value });
-          }
-        }
-        
-        // Return modified headers - this allows us to set ANY header including forbidden ones
-        return { requestHeaders: newHeaders };
+    const originalHeaders = HttpModel.normalizeHeaders(details.requestHeaders);
+    const extensionRequestIdHeader = originalHeaders.find(
+      (header) =>
+        header.name.toLowerCase() ===
+        EXTENSION_REQUEST_MARKER_HEADER.toLowerCase(),
+    );
+    let extensionRequestId = extensionRequestChains.get(details.requestId);
+
+    if (extensionRequestIdHeader) {
+      const markedRequest = pendingExtensionRequests.get(
+        extensionRequestIdHeader.value,
+      );
+      if (markedRequest) {
+        extensionRequestId = extensionRequestIdHeader.value;
+        extensionRequestChains.track(details.requestId, extensionRequestId);
       }
     }
-    
-    const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
-    if (!captureEnabled || !isTrackedTab) return {};
-    
+
+    if (extensionRequestId) {
+      const pendingExtensionRequest =
+        pendingExtensionRequests.get(extensionRequestId);
+
+      if (pendingExtensionRequest) {
+        let forwardedHeaders = HttpModel.normalizeHeaders(
+          pendingExtensionRequest.headers,
+        ).filter(
+          (header) =>
+            header.name.toLowerCase() !==
+            EXTENSION_REQUEST_MARKER_HEADER.toLowerCase(),
+        );
+        forwardedHeaders = RequestInterception.sanitizeHeadersForRedirect(
+          pendingExtensionRequest.url,
+          details.url,
+          forwardedHeaders,
+        );
+        // Firefox calculates framing headers from the actual fetch body. Reuse
+        // those values instead of the captured Content-Length, which may be
+        // stale after editing. Dropping the calculated value causes Firefox to
+        // send an empty upload body for extension-origin Repeater requests.
+        forwardedHeaders = HttpModel.replaceHeadersFromSource(
+          forwardedHeaders,
+          originalHeaders,
+          ["content-length", "transfer-encoding"],
+        );
+        return {
+          requestHeaders: forwardedHeaders,
+        };
+      }
+    }
+
     const requestId = requestIdMap.get(details.requestId);
     if (!requestId) return {};
-    
+
     const request = requests.get(requestId);
-    
-    // Check for Pending Body Modification
-    if (pendingBodyModifications.has(details.requestId)) {
-        const pendingBodyMod = pendingBodyModifications.get(details.requestId);
-        pendingBodyModifications.delete(details.requestId);
-        
-        if (request) {
-            request.originalBody = request.requestBody;
-            request.modifiedBody = pendingBodyMod.modifiedBody;
-            request.statusLine = 'Auto-Modified (Body)';
-            
-            // Apply header rules
-            const { headers: newHeaders, modified: headersModified } = applyHeaderRules(details.requestHeaders);
-            
-            if (headersModified) {
-                request.statusLine = 'Auto-Modified (Body & Headers)';
-            }
 
-            // Store original and modified headers
-            request.originalHeaders = details.requestHeaders.reduce((acc, h) => ({ ...acc, [h.name]: h.value }), {});
-            
-            const newHeadersObj = newHeaders.reduce((acc, h) => {
-                acc[h.name] = h.value;
-                return acc;
-            }, {});
-            
-            // Update request object with headers so they appear in UI
-            request.requestHeaders = newHeadersObj;
-            request.modifiedHeaders = newHeadersObj;
+    const { headers: effectiveHeaders, modified: headersModified } =
+      applyHeaderRules(originalHeaders);
+    const fallbackResponse = headersModified
+      ? { requestHeaders: effectiveHeaders }
+      : {};
 
-            // Prepare headers for fetch (filtering unsafe)
-            const headers = {};
-            // Cookie is kept: it's re-applied via onBeforeSendHeaders (marker path), which
-            // can set forbidden headers, so the resent request replays the page's session.
-            const unsafeHeaders = ['host', 'content-length', 'connection', 'origin', 'referer', 'accept-encoding', 'user-agent'];
+    if (!request) return fallbackResponse;
 
-            newHeaders.forEach(h => {
-                if (!unsafeHeaders.includes(h.name.toLowerCase())) {
-                    headers[h.name] = h.value;
-                }
-            });
-            
-            // Resend
-            resendModifiedRequest(request, {
-                url: details.url,
-                method: details.method,
-                headers: headers,
-                body: pendingBodyMod.modifiedBody
-            });
-            
-            return { cancel: true };
-        }
-    }
-    
-    // Apply Match & Replace for Headers
-    const { headers: newHeaders, modified: headersModified } = applyHeaderRules(details.requestHeaders);
-    
+    request.requestHeaders = HttpModel.cloneHeaders(effectiveHeaders);
+    request.requestBodyModel = HttpModel.refineRequestBodyModel(
+      request.requestBodyModel,
+      effectiveHeaders,
+    );
+    request.requestBody = request.requestBodyModel.text;
+    request.requestSize =
+      parseInt(
+        HttpModel.getHeaderValue(effectiveHeaders, "content-length"),
+        10,
+      ) ||
+      request.requestBodyModel.byteLength ||
+      0;
+
     if (headersModified) {
-        if (request) {
-            request.wasModified = true;
-            request.autoModified = true;
-            request.originalHeaders = details.requestHeaders.reduce((acc, h) => ({ ...acc, [h.name]: h.value }), {});
-            request.statusLine = (request.statusLine && request.statusLine !== 'Pending' ? request.statusLine : 'Auto-Modified') + ' (Headers)';
-            
-            request.requestHeaders = newHeaders.reduce((acc, header) => {
-                acc[header.name] = header.value;
-                if (header.name.toLowerCase() === 'content-length') {
-                    request.requestSize = parseInt(header.value, 10) || 0;
-                }
-                return acc;
-            }, {});
-        }
-        
-        // Send update immediately to reflect auto-modification
-        if (request) {
-                notifyDevTools({
-                type: 'updateRequest',
-                request: request
-                });
-        }
-
-        return { requestHeaders: newHeaders };
+      request.wasModified = true;
+      request.autoModified = true;
+      request.originalHeaders = HttpModel.cloneHeaders(originalHeaders);
+      request.modifiedHeaders = HttpModel.cloneHeaders(effectiveHeaders);
+      request.statusLine = "Auto-Modified (Headers)";
     }
 
-    if (request) {
-      // Standard logic - update headers from details (original)
-      request.requestHeaders = details.requestHeaders.reduce((acc, header) => {
-        acc[header.name] = header.value;
-        if (header.name.toLowerCase() === 'content-length') {
-          request.requestSize = parseInt(header.value, 10) || 0;
-        }
-        return acc;
-      }, {});
-      
-      notifyDevTools({
-        type: 'updateRequest',
-        request: request
-      });
-      
-      if (request.shouldIntercept && !pendingRequests.has(details.requestId)) {
-        return new Promise((resolve) => {
-          request.intercepted = true;
-          request.statusLine = 'Intercepted (Headers)';
-          
-          const pendingData = {
-            ...request,
-            resolve: resolve,
-            originalRequestId: details.requestId,
-            stage: 'onBeforeSendHeaders'
-          };
-          pendingRequests.set(details.requestId, pendingData);
-          
-          notifyDevTools({
-            type: 'interceptRequest',
-            request: {
-                ...request,
-                stage: 'onBeforeSendHeaders'
-            }
-          });
+    notifyDevTools({ type: "updateRequest", request });
+
+    if (
+      request.shouldIntercept &&
+      !request.interceptionHandled &&
+      !pendingRequests.has(details.requestId)
+    ) {
+      return new Promise((resolve) => {
+        request.intercepted = true;
+        request.statusLine = "Intercepted (Headers)";
+
+        const pendingData = {
+          ...request,
+          resolve,
+          fallbackResponse,
+          originalRequestId: details.requestId,
+          createdAt: Date.now(),
+          stage: "onBeforeSendHeaders",
+        };
+        pendingRequests.set(details.requestId, pendingData);
+        armPendingTimeout(pendingData, REQUEST_INTERCEPT_TIMEOUT_MS, () => {
+          if (pendingRequests.get(details.requestId) !== pendingData) return;
+          resolvePendingRequest(
+            details.requestId,
+            pendingData,
+            pendingData.fallbackResponse,
+            "timeout",
+          );
         });
-      }
+
+        notifyDevTools({
+          type: "interceptRequest",
+          request: { ...request, stage: "onBeforeSendHeaders" },
+        });
+      });
     }
-    
-    return {};
+
+    return fallbackResponse;
   },
   { urls: ["<all_urls>"] },
-  ["blocking", "requestHeaders"]
+  ["blocking", "requestHeaders"],
 );
 
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
-    const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
-    if (!captureEnabled || details.tabId === -1 || !isTrackedTab) {
-      return {};
-    }
-    
     const requestId = requestIdMap.get(details.requestId);
     if (!requestId) return {};
-    
+
     const request = requests.get(requestId);
     if (!request) return {};
-    
-    const shouldInterceptResponse = interceptedRequestIds.has(details.requestId);
-    
-    const contentType = (details.responseHeaders?.find(h => 
-      h.name.toLowerCase() === 'content-type'
-    )?.value || '').toLowerCase();
-    
-    const isTextContent = contentType.includes('json') || 
-        contentType.includes('text') || 
-        contentType.includes('xml') ||
-        contentType.includes('javascript') ||
-        contentType.includes('html');
-    
-    const isImageContent = contentType.includes('image/');
-    
-    if (isTextContent || isImageContent) {
+
+    const shouldInterceptResponse = interceptedRequestIds.has(
+      details.requestId,
+    );
+
+    const contentType = (
+      HttpModel.getHeaderValue(details.responseHeaders, "content-type") || ""
+    ).toLowerCase();
+
+    const isTextContent =
+      HttpModel.responseBodyEncodingForContentType(contentType) === "text";
+    const isImageContent = contentType.includes("image/");
+    const isBinaryContent = !isTextContent;
+    const responseBodyRules = isTextContent
+      ? matchReplaceRules.filter(
+          (rule) => rule.enabled && rule.target === "response_body",
+        )
+      : [];
+    const applyResponseBodyRules = responseBodyRules.length > 0;
+
+    // Text and image responses are captured during normal operation. When
+    // response interception is explicitly requested, unknown and other
+    // binary content types are also handled byte-for-byte as Base64.
+    if (shouldInterceptResponse || isTextContent || isImageContent) {
       const filter = browser.webRequest.filterResponseData(details.requestId);
-      const decoder = new TextDecoder('utf-8');
-      let responseData = [];
-      
+      const decoder = new TextDecoder("utf-8");
+      const captureCollector = ByteBufferCore.createBoundedCollector(
+        isTextContent ? SECURITY_SCAN_LIMIT : DISPLAY_CAPTURE_LIMIT,
+      );
+
       if (shouldInterceptResponse) {
-        filter.ondata = event => {
-          responseData.push(event.data);
+        const responseControl = {
+          bypassBody: false,
+          tabId: request.tabId,
         };
-        
-        filter.onstop = event => {
-          try {
-            const combinedData = new Uint8Array(
-              responseData.reduce((acc, chunk) => acc + chunk.byteLength, 0)
+        responseInterceptionControls.set(details.requestId, responseControl);
+        const editableBuffer = ByteBufferCore.createWholeChunkBuffer(
+          EDITABLE_RESPONSE_LIMIT,
+        );
+        let bypassReason = null;
+
+        filter.ondata = (event) => {
+          captureCollector.add(event.data);
+
+          if (responseControl.bypassBody) {
+            const buffered = editableBuffer.drain();
+            if (buffered.byteLength > 0) filter.write(buffered);
+            filter.write(event.data);
+            return;
+          }
+
+          if (!editableBuffer.tryAdd(event.data)) {
+            const buffered = editableBuffer.drain();
+            if (buffered.byteLength > 0) filter.write(buffered);
+            filter.write(event.data);
+            responseControl.bypassBody = true;
+            bypassReason = "size-limit";
+          }
+        };
+
+        filter.onerror = (event) => {
+          console.error("Intercepted response filter failed:", event.error);
+
+          const pendingHeader = pendingResponseHeaderIntercepts.get(requestId);
+          if (pendingHeader?.originalRequestId === details.requestId) {
+            resolvePendingResponseHeaders(
+              requestId,
+              pendingHeader,
+              {},
+              "filter-error",
             );
-            let offset = 0;
-            for (const chunk of responseData) {
-              combinedData.set(new Uint8Array(chunk), offset);
-              offset += chunk.byteLength;
+          }
+
+          const pendingBody = pendingResponses.get(details.requestId);
+          if (pendingBody) {
+            settlePendingData(pendingBody, () => {
+              pendingResponses.delete(details.requestId);
+              try {
+                pendingBody.filter.close();
+              } catch {}
+              notifyInterceptionReleased(
+                pendingBody,
+                "response",
+                "filter-error",
+              );
+            });
+          }
+
+          responseControl.bypassBody = true;
+          responseInterceptionControls.delete(details.requestId);
+          interceptedRequestIds.delete(details.requestId);
+          interceptedResponseTabIds.delete(details.requestId);
+        };
+
+        filter.onstop = () => {
+          let combinedData = null;
+          try {
+            if (responseControl.bypassBody) {
+              try {
+                const buffered = editableBuffer.drain();
+                if (buffered.byteLength > 0) filter.write(buffered);
+                filter.close();
+                updateResponseCapture(
+                  request,
+                  captureCollector,
+                  isBinaryContent,
+                );
+                if (bypassReason === "size-limit") {
+                  request.responseInterceptSkipped = "size-limit";
+                  request.statusLine =
+                    "Response Forwarded (Over 10 MiB Edit Limit)";
+                }
+                notifyDevTools({ type: "updateRequest", request });
+              } finally {
+                responseInterceptionControls.delete(details.requestId);
+                interceptedRequestIds.delete(details.requestId);
+                interceptedResponseTabIds.delete(details.requestId);
+              }
+              return;
             }
-            
+
+            combinedData = editableBuffer.drain();
+            updateResponseCapture(request, captureCollector, isBinaryContent);
+
             let bodyContent;
-            if (isImageContent) {
-              bodyContent = safeUint8ArrayToBase64(combinedData);
-              request.responseBody = bodyContent;
-              request.isBase64 = true;
+            if (isBinaryContent) {
+              bodyContent = HttpModel.bytesToBase64(combinedData);
             } else {
               bodyContent = decoder.decode(combinedData);
-              request.responseBody = bodyContent.substring(0, 50000);
-              request.isBase64 = false;
             }
-            
+
             const responseInterceptData = {
               requestId: requestId,
               originalRequestId: details.requestId,
               filter: filter,
               responseHeaders: details.responseHeaders,
               responseBody: bodyContent,
+              originalBytes: combinedData,
               statusCode: details.statusCode,
               statusLine: details.statusLine,
               request: request,
-              isBase64: isImageContent,
-              stage: 'responseBody'
+              tabId: request.tabId,
+              isBase64: isBinaryContent,
+              createdAt: Date.now(),
+              stage: "responseBody",
             };
-            
+
             pendingResponses.set(details.requestId, responseInterceptData);
+            responseInterceptionControls.delete(details.requestId);
+            armPendingTimeout(
+              responseInterceptData,
+              RESPONSE_BODY_INTERCEPT_TIMEOUT_MS,
+              () => {
+                if (
+                  pendingResponses.get(details.requestId) !==
+                  responseInterceptData
+                )
+                  return;
+
+                settlePendingData(responseInterceptData, () => {
+                  pendingResponses.delete(details.requestId);
+                  try {
+                    responseInterceptData.filter.write(
+                      getOriginalResponseData(responseInterceptData),
+                    );
+                    responseInterceptData.filter.close();
+                  } catch (error) {
+                    console.error(
+                      "Failed to release timed out response:",
+                      error,
+                    );
+                    try {
+                      responseInterceptData.filter.close();
+                    } catch {}
+                  }
+                  notifyInterceptionReleased(
+                    responseInterceptData,
+                    "response",
+                    "timeout",
+                  );
+                });
+              },
+            );
             interceptedRequestIds.delete(details.requestId);
             interceptedResponseTabIds.delete(details.requestId);
-            
+
             notifyDevTools({
-              type: 'interceptResponse',
+              type: "interceptResponse",
               response: {
                 requestId: requestId,
                 statusCode: details.statusCode,
                 statusLine: details.statusLine,
-                responseHeaders: details.responseHeaders,
+                responseHeaders: request.responseHeaders,
                 responseBody: bodyContent,
-                isBase64: isImageContent,
-                stage: 'responseBody'
-              }
+                isBase64: isBinaryContent,
+                stage: "responseBody",
+              },
             });
-            
           } catch (e) {
-            console.error('Failed to decode response for interception:', e);
-            filter.close();
+            console.error("Failed to decode response for interception:", e);
+            const pendingBody = pendingResponses.get(details.requestId);
+            if (pendingBody?.filter === filter) {
+              settlePendingData(pendingBody, () => {
+                pendingResponses.delete(details.requestId);
+                writeOriginalResponseFailSafe(
+                  pendingBody,
+                  "response interception setup failure",
+                );
+                notifyInterceptionReleased(
+                  pendingBody,
+                  "response",
+                  "interception-setup-failed",
+                );
+              });
+            } else {
+              const buffered = combinedData || editableBuffer.drain();
+              writeOriginalResponseFailSafe(
+                { filter, originalBytes: buffered },
+                "response interception setup failure",
+              );
+            }
+            responseInterceptionControls.delete(details.requestId);
+            interceptedRequestIds.delete(details.requestId);
+            interceptedResponseTabIds.delete(details.requestId);
           }
         };
-        
+
         return new Promise((resolve) => {
-            const pendingHeaderData = {
+          const pendingHeaderData = {
+            requestId: requestId,
+            originalRequestId: details.requestId,
+            resolve: resolve,
+            filter: filter,
+            tabId: request.tabId,
+            responseHeaders: details.responseHeaders,
+            statusCode: details.statusCode,
+            statusLine: details.statusLine,
+            createdAt: Date.now(),
+            stage: "responseHeaders",
+            request: request,
+            responseControl,
+          };
+          pendingResponseHeaderIntercepts.set(requestId, pendingHeaderData);
+          armPendingTimeout(
+            pendingHeaderData,
+            RESPONSE_HEADER_INTERCEPT_TIMEOUT_MS,
+            () => {
+              if (
+                pendingResponseHeaderIntercepts.get(requestId) !==
+                pendingHeaderData
+              )
+                return;
+              resolvePendingResponseHeaders(
+                requestId,
+                pendingHeaderData,
+                {},
+                "timeout",
+              );
+            },
+          );
+
+          notifyDevTools({
+            type: "interceptResponse",
+            response: {
               requestId: requestId,
-              originalRequestId: details.requestId,
-              resolve: resolve,
-              responseHeaders: details.responseHeaders,
               statusCode: details.statusCode,
               statusLine: details.statusLine,
-              stage: 'responseHeaders',
-              request: request
-            };
-            pendingResponseHeaderIntercepts.set(requestId, pendingHeaderData);
-            
-            notifyDevTools({
-              type: 'interceptResponse',
-              response: {
-                 requestId: requestId,
-                 statusCode: details.statusCode,
-                 statusLine: details.statusLine,
-                 responseHeaders: details.responseHeaders,
-                 stage: 'responseHeaders'
-              }
-            });
-         });
-
+              responseHeaders: details.responseHeaders,
+              stage: "responseHeaders",
+            },
+          });
+        });
       } else {
-        const responseBodyRules = isTextContent
-          ? matchReplaceRules.filter(r => r.enabled && r.target === 'response_body')
-          : [];
-        const applyResponseBodyRules = responseBodyRules.length > 0;
+        const ruleBuffer = applyResponseBodyRules
+          ? ByteBufferCore.createWholeChunkBuffer(EDITABLE_RESPONSE_LIMIT)
+          : null;
+        let responseRulesBypassed = false;
 
-        filter.ondata = event => {
-          responseData.push(event.data);
-          // When response-body rules apply we buffer the whole body and write the
-          // modified version in onstop; otherwise stream chunks straight through.
+        filter.ondata = (event) => {
+          captureCollector.add(event.data);
+
           if (!applyResponseBodyRules) {
             filter.write(event.data);
+          } else if (responseRulesBypassed) {
+            filter.write(event.data);
+          } else if (!ruleBuffer.tryAdd(event.data)) {
+            const buffered = ruleBuffer.drain();
+            if (buffered.byteLength > 0) filter.write(buffered);
+            filter.write(event.data);
+            responseRulesBypassed = true;
           }
         };
 
-        filter.onstop = event => {
+        filter.onstop = () => {
           try {
-            const combinedData = new Uint8Array(
-              responseData.reduce((acc, chunk) => acc + chunk.byteLength, 0)
+            const capturedData = updateResponseCapture(
+              request,
+              captureCollector,
+              isBinaryContent,
             );
-            let offset = 0;
-            for (const chunk of responseData) {
-              combinedData.set(new Uint8Array(chunk), offset);
-              offset += chunk.byteLength;
-            }
-            
-            if (isImageContent) {
-              const base64 = safeUint8ArrayToBase64(combinedData);
-              request.responseBody = base64;
-              request.isBase64 = true;
-            } else {
-              let text = decoder.decode(combinedData);
+
+            if (isTextContent) {
+              let text = decoder.decode(capturedData);
 
               // Apply Match & Replace rules targeting the Response Body
               let responseModified = false;
-              for (const rule of responseBodyRules) {
-                const replaced = applyRuleReplacement(text, rule);
-                if (replaced !== text) {
-                  text = replaced;
-                  responseModified = true;
+              if (applyResponseBodyRules && !responseRulesBypassed) {
+                const ruleBytes = ruleBuffer.drain();
+                let ruleText = decoder.decode(ruleBytes);
+                for (const rule of responseBodyRules) {
+                  const replaced = applyRuleReplacement(ruleText, rule);
+                  if (replaced !== ruleText) {
+                    ruleText = replaced;
+                    responseModified = true;
+                  }
                 }
-              }
-              if (applyResponseBodyRules) {
-                filter.write(new TextEncoder().encode(text));
+                if (responseModified) {
+                  const modifiedBytes = new TextEncoder().encode(ruleText);
+                  if (modifiedBytes.byteLength > EDITABLE_RESPONSE_LIMIT) {
+                    filter.write(ruleBytes);
+                    responseModified = false;
+                    request.responseRuleSkipped = "replacement-size-limit";
+                    request.statusLine =
+                      "Response Rule Skipped (Output Over 10 MiB Limit)";
+                  } else {
+                    filter.write(modifiedBytes);
+                    text = decoder.decode(
+                      modifiedBytes.subarray(0, SECURITY_SCAN_LIMIT),
+                    );
+                    request.responseBody = decoder.decode(
+                      modifiedBytes.subarray(0, DISPLAY_CAPTURE_LIMIT),
+                    );
+                    request.totalBytes = modifiedBytes.byteLength;
+                    request.responseSize = modifiedBytes.byteLength;
+                    request.capturedBytes = Math.min(
+                      modifiedBytes.byteLength,
+                      DISPLAY_CAPTURE_LIMIT,
+                    );
+                    request.truncated =
+                      modifiedBytes.byteLength > DISPLAY_CAPTURE_LIMIT;
+                  }
+                } else {
+                  filter.write(ruleBytes);
+                }
+              } else if (responseRulesBypassed) {
+                request.responseRuleSkipped = "size-limit";
+                request.statusLine =
+                  "Response Rule Skipped (Over 10 MiB Limit)";
               }
               if (responseModified) {
                 request.wasModified = true;
                 request.autoModified = true;
                 request.responseModified = true;
-                request.statusLine = 'Response Modified (Rule)';
+                request.statusLine = "Response Modified (Rule)";
               }
-
-              request.responseBody = text.substring(0, 50000);
-              request.isBase64 = false;
 
               // Helper to extract referer header or document URL
               const getRequestReferer = (req, det) => {
-                let ref = '';
+                let ref = "";
                 if (req && req.requestHeaders) {
-                  const found = Object.entries(req.requestHeaders).find(([k]) => k.toLowerCase() === 'referer');
-                  if (found) ref = found[1];
+                  ref =
+                    HttpModel.getHeaderValue(req.requestHeaders, "referer") ||
+                    "";
                 }
                 if (!ref && det) {
-                  ref = det.documentUrl || det.originUrl || '';
+                  ref = det.documentUrl || det.originUrl || "";
                 }
                 return ref;
               };
 
               const getHostname = (u) => {
-                if (!u) return '';
-                try { return new URL(u).hostname; } catch { return ''; }
+                if (!u) return "";
+                try {
+                  return new URL(u).hostname;
+                } catch {
+                  return "";
+                }
               };
 
               // Background security scanning - runs even when DevTools is closed
-              if (captureEnabled && SecurityScanner.isScannable(contentType)) {
+              if (SecurityScanner.isScannable(contentType)) {
                 const scanResults = SecurityScanner.scan(text, details.url);
                 if (scanResults && scanResults.totalFindings > 0) {
                   const refUrl = getRequestReferer(request, details);
                   scanResults.requestId = request.id;
+                  scanResults.tabId = request.tabId;
                   scanResults.domain = getHostname(details.url);
                   scanResults.referer = refUrl;
                   scanResults.refererDomain = getHostname(refUrl);
                   securityFindings.push(scanResults);
-                  
+
                   // Limit stored findings
                   if (securityFindings.length > MAX_FINDINGS) {
                     securityFindings = securityFindings.slice(-MAX_FINDINGS);
                   }
-                  
+
                   // Persist findings to storage
-                  browser.storage.local.set({ securityFindings }).catch(err => {
-                    console.error('Failed to save security findings:', err);
-                  });
-                  
+                  scheduleFindingsPersistence();
+
                   // Update badge
                   updateBadge();
-                  
+
                   // Notify DevTools if connected
                   notifyDevTools({
-                    type: 'securityFinding',
-                    finding: scanResults
+                    type: "securityFinding",
+                    finding: scanResults,
                   });
                 }
               }
-              
+
               // Background library scanning - detect vulnerable JS libraries
-              if (captureEnabled && LibraryScanner.initialized) {
-                const isJs = contentType && (
-                  contentType.includes('javascript') || 
-                  contentType.includes('text/javascript') ||
-                  LibraryScanner.isJavaScriptUrl(details.url)
-                );
-                
+              if (LibraryScanner.initialized) {
+                const isJs =
+                  contentType &&
+                  (contentType.includes("javascript") ||
+                    contentType.includes("text/javascript") ||
+                    LibraryScanner.isJavaScriptUrl(details.url));
+
                 if (isJs) {
                   const libResults = LibraryScanner.scan(details.url, text);
                   if (libResults && libResults.totalFindings > 0) {
                     const refUrl = getRequestReferer(request, details);
                     libResults.requestId = request.id;
+                    libResults.tabId = request.tabId;
                     libResults.domain = getHostname(details.url);
                     libResults.referer = refUrl;
                     libResults.refererDomain = getHostname(refUrl);
                     libraryFindings.push(libResults);
-                    
+
                     // Limit stored findings
                     if (libraryFindings.length > MAX_LIBRARY_FINDINGS) {
-                      libraryFindings = libraryFindings.slice(-MAX_LIBRARY_FINDINGS);
+                      libraryFindings = libraryFindings.slice(
+                        -MAX_LIBRARY_FINDINGS,
+                      );
                     }
-                    
+
                     // Persist findings to storage
-                    browser.storage.local.set({ libraryFindings }).catch(err => {
-                      console.error('Failed to save library findings:', err);
-                    });
-                    
+                    scheduleFindingsPersistence();
+
                     // Update badge
                     updateBadge();
-                    
+
                     // Notify DevTools if connected
                     notifyDevTools({
-                      type: 'libraryFinding',
-                      finding: libResults
+                      type: "libraryFinding",
+                      finding: libResults,
                     });
                   }
                 }
@@ -1508,345 +1925,595 @@ browser.webRequest.onHeadersReceived.addListener(
             filter.close();
 
             notifyDevTools({
-              type: 'updateRequest',
-              request: request
+              type: "updateRequest",
+              request: request,
             });
           } catch (e) {
-            console.error('Failed to decode response:', e);
-            try { filter.close(); } catch (_) {}
+            console.error("Failed to decode response:", e);
+            try {
+              filter.close();
+            } catch {}
           }
         };
       }
     }
-    
-    return {};
+
+    return applyResponseBodyRules
+      ? {
+          responseHeaders: HttpModel.removeHeader(
+            details.responseHeaders,
+            "content-length",
+          ),
+        }
+      : {};
   },
-  { urls: ["<all_urls>"], types: ["xmlhttprequest", "main_frame", "sub_frame", "image", "media", "font", "script", "stylesheet", "other"] },
-  ["blocking", "responseHeaders"]
+  {
+    urls: ["<all_urls>"],
+    types: [
+      "xmlhttprequest",
+      "main_frame",
+      "sub_frame",
+      "image",
+      "media",
+      "font",
+      "script",
+      "stylesheet",
+      "other",
+    ],
+  },
+  ["blocking", "responseHeaders"],
 );
 
 browser.webRequest.onResponseStarted.addListener(
   (details) => {
-    const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
-    if (!captureEnabled || !isTrackedTab) return;
-    
     const requestId = requestIdMap.get(details.requestId);
     if (!requestId) return;
-    
+
     const request = requests.get(requestId);
     if (request) {
       request.statusCode = details.statusCode;
       request.statusLine = details.statusLine;
-      request.responseHeaders = details.responseHeaders.reduce((acc, header) => {
-        acc[header.name] = header.value;
-        if (header.name.toLowerCase() === 'content-length') {
-          request.responseSize = parseInt(header.value, 10) || 0;
-        }
-        return acc;
-      }, {});
+      request.responseHeaders = HttpModel.cloneHeaders(details.responseHeaders);
+      request.responseSize =
+        parseInt(
+          HttpModel.getHeaderValue(details.responseHeaders, "content-length"),
+          10,
+        ) || 0;
       notifyDevTools({
-        type: 'updateRequest',
-        request: request
+        type: "updateRequest",
+        request: request,
       });
     }
   },
   { urls: ["<all_urls>"] },
-  ["responseHeaders"]
+  ["responseHeaders"],
 );
 
 browser.webRequest.onCompleted.addListener(
   (details) => {
-    const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
-    if (!captureEnabled || !isTrackedTab) return;
-    
+    extensionRequestChains.clear(details.requestId);
+    ruleRedirects.clear(details.requestId);
     const requestId = requestIdMap.get(details.requestId);
+    const replacementJob = pendingReplacementJobs.get(details.requestId);
+    requestIdMap.delete(details.requestId);
+    interceptedRequestIds.delete(details.requestId);
+    interceptedResponseTabIds.delete(details.requestId);
+    responseInterceptionControls.delete(details.requestId);
+
     if (!requestId) return;
-    
+
     const request = requests.get(requestId);
+    if (replacementJob && !replacementJob.started) {
+      replacementJob.failOnce("original-completed");
+    }
     if (request) {
-      request.completed = true;
+      request.completed = replacementJob?.started
+        ? ["succeeded", "failed", "timeout"].includes(request.replacementState)
+        : true;
       notifyDevTools({
-        type: 'updateRequest',
-        request: request
+        type: "updateRequest",
+        request: request,
       });
-      requestIdMap.delete(details.requestId);
     }
   },
-  { urls: ["<all_urls>"] }
+  { urls: ["<all_urls>"] },
 );
 
 browser.webRequest.onErrorOccurred.addListener(
   (details) => {
-    const isTrackedTab = inspectedTabs.has(details.tabId) || details.tabId === activeTabId;
-    if (!captureEnabled || !isTrackedTab) return;
-    
+    extensionRequestChains.clear(details.requestId);
+    ruleRedirects.clear(details.requestId);
     const requestId = requestIdMap.get(details.requestId);
+    const replacementJob = pendingReplacementJobs.get(details.requestId);
+    if (replacementJob) {
+      replacementJob.startOnce("original-cancelled");
+    }
+    requestIdMap.delete(details.requestId);
+    interceptedRequestIds.delete(details.requestId);
+    interceptedResponseTabIds.delete(details.requestId);
+    responseInterceptionControls.delete(details.requestId);
+
     if (!requestId) return;
-    
+
     const request = requests.get(requestId);
     if (request) {
       request.statusCode = 0;
-      request.statusLine = `Error: ${details.error}`;
-      request.completed = true;
+      request.originalNetworkError = details.error;
+      request.originalCompleted = true;
+      if (
+        !["cancelled", "cancellation-unconfirmed"].includes(
+          request.originalOutcome,
+        )
+      ) {
+        request.statusLine = `Error: ${details.error}`;
+        request.completed = true;
+      }
       notifyDevTools({
-        type: 'updateRequest',
-        request: request
+        type: "updateRequest",
+        request: request,
       });
-      requestIdMap.delete(details.requestId);
     }
   },
-  { urls: ["<all_urls>"] }
+  { urls: ["<all_urls>"] },
 );
 
-browser.runtime.onConnect.addListener((port) => {
-  if (port.name === 'devtools-panel') {
-    // DevTools pages do not reliably expose sender.tab. Give every panel its own
-    // key so opening a second panel cannot replace the first one's port.
-    const portId = `devtools_${++devtoolsPortCounter}`;
-    devtoolsPorts.set(portId, port);
-    
-    port.postMessage({
-      type: 'initialState',
-      captureEnabled: captureEnabled,
-      interceptEnabled: interceptEnabled,
-      interceptSettings: interceptSettings,
-      requests: Array.from(requests.values()),
-      securityFindings: securityFindings,
-      libraryFindings: libraryFindings
-    });
-    
-    port.onMessage.addListener((msg) => {
-      handleDevToolsMessage(msg, port);
-    });
-    
-    port.onDisconnect.addListener(() => {
-      devtoolsPorts.delete(portId);
-      // Clean up inspected tab when DevTools closes
-      if (port.inspectedTabId) {
-        const anotherPanelIsOpen = Array.from(devtoolsPorts.values())
-          .some(otherPort => otherPort.inspectedTabId === port.inspectedTabId);
+function getRequestsForTab(tabId) {
+  return Array.from(requests.values()).filter(
+    (request) => request.tabId === tabId,
+  );
+}
 
-        if (!anotherPanelIsOpen) {
-          inspectedTabs.delete(port.inspectedTabId);
-          // Never leave network requests paused after their controlling DevTools
-          // panel has been closed.
-          releasePendingInterceptions(port.inspectedTabId);
-        }
-      }
-    });
+function getFindingsForTab(findings, tabId) {
+  return findings.filter((finding) => findingBelongsToTab(finding, tabId));
+}
+
+function sendInitialState(port, tabId) {
+  const state = tabSessions.get(tabId, true);
+  safePortMessage(port, {
+    type: "initialState",
+    captureEnabled: state.captureEnabled,
+    interceptEnabled: state.interceptEnabled,
+    interceptSettings,
+    requests: getRequestsForTab(tabId),
+    securityFindings: getFindingsForTab(securityFindings, tabId),
+    libraryFindings: getFindingsForTab(libraryFindings, tabId),
+  });
+}
+
+function clearRequestsForTab(tabId) {
+  releasePendingInterceptions(tabId);
+  const removedRequestIds = new Set();
+
+  for (const [requestId, request] of requests.entries()) {
+    if (request.tabId !== tabId) continue;
+    removedRequestIds.add(requestId);
+    replacementResults.delete(requestId);
+    requests.delete(requestId);
   }
+
+  for (const [browserRequestId, requestId] of requestIdMap.entries()) {
+    if (removedRequestIds.has(requestId)) {
+      requestIdMap.delete(browserRequestId);
+    }
+  }
+
+  clearSecurityFindings(tabId);
+  clearLibraryFindings(tabId);
+}
+
+browser.runtime.onConnect.addListener((port) => {
+  if (port.name !== "devtools-panel") return;
+
+  const record = devtoolsPorts.register(port);
+
+  port.onMessage.addListener((msg) => {
+    handleDevToolsMessage(msg, record);
+  });
+
+  port.onDisconnect.addListener(() => {
+    const disconnectedRecord = devtoolsPorts.unregister(record.id);
+    const tabId = disconnectedRecord?.inspectedTabId;
+
+    if (
+      globalThis.EnhancedNetworkTab.TabSessionCore.isValidTabId(tabId) &&
+      !devtoolsPorts.hasTab(tabId)
+    ) {
+      inspectedTabs.delete(tabId);
+      // A pending intercept has no UI owner after the final DevTools panel
+      // disconnects. Keep capture enabled, but stop interception so both the
+      // current queue and future requests continue without waiting for a
+      // panel that can no longer answer.
+      setTabInterceptEnabled(tabId, false);
+    }
+  });
 });
 
-function handleDevToolsMessage(msg, port) {
+function handleDevToolsMessage(msg, portRecord) {
+  if (msg.type === "setInspectedTab") {
+    const attachedRecord = devtoolsPorts.attachTab(portRecord.id, msg.tabId);
+    if (!attachedRecord) return;
+
+    inspectedTabs.add(msg.tabId);
+    settingsLoadPromise.then(() => {
+      sendInitialState(attachedRecord.port, msg.tabId);
+    });
+    updateIcon(msg.tabId);
+    return;
+  }
+
+  if (msg.type === "getVulnerabilityDbStatus") {
+    reportVulnerabilityDbStatus(portRecord.port);
+    return;
+  }
+
+  if (msg.type === "updateVulnerabilityDb") {
+    refreshVulnerabilityDb(portRecord.port, msg.force === true);
+    return;
+  }
+
+  const tabId = portRecord.inspectedTabId;
+  if (!globalThis.EnhancedNetworkTab.TabSessionCore.isValidTabId(tabId)) return;
+  const port = portRecord.port;
+
   switch (msg.type) {
-    case 'setInspectedTab':
-      if (msg.tabId) {
-        inspectedTabs.add(msg.tabId);
-        // Store the tab ID with the port for cleanup
-        port.inspectedTabId = msg.tabId;
-      }
-      break;
-      
-    case 'toggleCapture':
-      captureEnabled = msg.enabled;
-      if (!captureEnabled && interceptEnabled) {
-        interceptEnabled = false;
-        notifyDevTools({ type: 'interceptStateChanged', enabled: false });
-      }
-      // Save capture state to storage
-      browser.storage.local.set({ captureEnabled: captureEnabled }).catch((err) => {
-        console.error('Failed to save capture state:', err);
-      });
-      updateIcon();
-      notifyDevTools({ type: 'captureStateChanged', enabled: captureEnabled });
-      break;
-      
-    case 'toggleIntercept':
-      interceptEnabled = msg.enabled;
-      if (interceptEnabled && !captureEnabled) {
-        captureEnabled = true;
-        notifyDevTools({ type: 'captureStateChanged', enabled: true });
-      }
-      updateIcon();
-      notifyDevTools({ type: 'interceptStateChanged', enabled: interceptEnabled });
-      break;
-      
-    case 'clearRequests':
-      requests.clear();
-      notifyDevTools({ type: 'requestsCleared' });
-      break;
-      
-    case 'forwardRequest':
-      handleForwardRequest(msg.requestId, msg.modifiedRequest);
-      break;
-      
-    case 'dropRequest':
-      handleDropRequest(msg.requestId);
-      break;
-      
-    case 'getRequestBody':
-      const request = requests.get(msg.requestId);
-      if (request) {
-        fetchResponseBody(request);
-      }
-      break;
-      
-    case 'sendRepeaterRequest':
-      handleRepeaterRequest(msg.requestData, port);
-      break;
-      
-    case 'updateInterceptSettings':
-      interceptSettings = { ...interceptSettings, ...msg.settings };
-      // Save to storage for persistence
-      browser.storage.local.set({ interceptSettings: interceptSettings }).catch((err) => {
-        console.error('Failed to save intercept settings:', err);
-      });
-      notifyDevTools({ type: 'interceptSettingsChanged', settings: interceptSettings });
+    case "toggleCapture":
+      setTabCaptureEnabled(tabId, msg.enabled);
       break;
 
-    case 'updateMatchReplaceRules':
-      matchReplaceRules = msg.rules;
-      browser.storage.local.set({ matchReplaceRules: matchReplaceRules }).catch((err) => {
-        console.error('Failed to save match replace rules:', err);
+    case "toggleIntercept":
+      setTabInterceptEnabled(tabId, msg.enabled);
+      break;
+
+    case "clearRequests":
+      clearRequestsForTab(tabId);
+      notifyDevTools({ type: "requestsCleared" }, tabId);
+      break;
+
+    case "forwardRequest":
+      if (requests.get(msg.requestId)?.tabId === tabId) {
+        handleForwardRequest(msg.requestId, msg.modifiedRequest, port);
+      }
+      break;
+
+    case "dropRequest":
+      if (requests.get(msg.requestId)?.tabId === tabId) {
+        handleDropRequest(msg.requestId);
+      }
+      break;
+
+    case "sendRepeaterRequest":
+      handleRepeaterRequest(msg.requestData, port, msg.requestId);
+      break;
+
+    case "getReplacementResult": {
+      const request = requests.get(msg.requestId);
+      if (request?.tabId !== tabId) break;
+      safePortMessage(port, {
+        type: "replacementResult",
+        requestId: msg.requestId,
+        requestData: getModifiedRequestData(request),
+        result: replacementResults.get(msg.requestId),
       });
       break;
-      
-    case 'getInterceptSettings':
-      port.postMessage({ type: 'interceptSettingsResponse', settings: interceptSettings });
+    }
+
+    case "claimExperimentalPromotion":
+      claimExperimentalPromotion(port);
       break;
-      
-    case 'getSecurityFindings':
-      port.postMessage({ type: 'securityFindingsResponse', findings: securityFindings });
+
+    case "updateInterceptSettings":
+      interceptSettings = {
+        ...interceptSettings,
+        ...msg.settings,
+        modifiedRequestAction:
+          RequestInterception.normalizeModifiedRequestAction(
+            msg.settings?.modifiedRequestAction ??
+              interceptSettings.modifiedRequestAction,
+          ),
+      };
+      if (
+        interceptSettings.modifiedRequestAction ===
+        RequestInterception.MODIFIED_REQUEST_ACTIONS.CANCEL_AND_SEND
+      ) {
+        interceptSettings.useEarlyInterception = false;
+      }
+      // Save to storage for persistence
+      browser.storage.local
+        .set({ interceptSettings: interceptSettings })
+        .catch((err) => {
+          console.error("Failed to save intercept settings:", err);
+        });
+      notifyDevTools({
+        type: "interceptSettingsChanged",
+        settings: interceptSettings,
+      });
       break;
-      
-    case 'clearSecurityFindings':
-      clearSecurityFindings();
-      notifyDevTools({ type: 'securityFindingsCleared' });
+
+    case "updateMatchReplaceRules":
+      matchReplaceRules = sanitizeMatchReplaceRules(msg.rules);
+      browser.storage.local
+        .set({ matchReplaceRules: matchReplaceRules })
+        .catch((err) => {
+          console.error("Failed to save match replace rules:", err);
+        });
       break;
-      
-    case 'getLibraryFindings':
-      port.postMessage({ type: 'libraryFindingsResponse', findings: libraryFindings });
+
+    case "getInterceptSettings":
+      port.postMessage({
+        type: "interceptSettingsResponse",
+        settings: interceptSettings,
+      });
       break;
-      
-    case 'clearLibraryFindings':
-      clearLibraryFindings();
-      notifyDevTools({ type: 'libraryFindingsCleared' });
+
+    case "getSecurityFindings":
+      port.postMessage({
+        type: "securityFindingsResponse",
+        findings: getFindingsForTab(securityFindings, tabId),
+      });
       break;
-      
-    case 'forwardResponse':
-      handleForwardResponse(msg.requestId, msg.modifiedResponse);
+
+    case "clearSecurityFindings":
+      clearSecurityFindings(tabId);
+      notifyDevTools({ type: "securityFindingsCleared" }, tabId);
       break;
-      
-    case 'dropResponse':
-      handleDropResponse(msg.requestId);
+
+    case "getLibraryFindings":
+      port.postMessage({
+        type: "libraryFindingsResponse",
+        findings: getFindingsForTab(libraryFindings, tabId),
+      });
       break;
-      
-    case 'disableIntercept':
-      handleDisableIntercept();
+
+    case "clearLibraryFindings":
+      clearLibraryFindings(tabId);
+      notifyDevTools({ type: "libraryFindingsCleared" }, tabId);
+      break;
+
+    case "forwardResponse":
+      if (requests.get(msg.requestId)?.tabId === tabId) {
+        handleForwardResponse(msg.requestId, msg.modifiedResponse, port);
+      }
+      break;
+
+    case "dropResponse":
+      if (requests.get(msg.requestId)?.tabId === tabId) {
+        handleDropResponse(msg.requestId);
+      }
+      break;
+
+    case "disableIntercept":
+      handleDisableIntercept(tabId);
       break;
   }
 }
 
-async function resendModifiedRequest(request, modifiedRequest) {
-    request.intercepted = false;
-    request.statusLine = 'Resending (Modified)';
-    
-    notifyDevTools({
-      type: 'updateRequest',
-      request: request
-    });
-    
-    // Generate unique repeater ID for tracking this request (reusing repeater system)
-    const repeaterId = `resend_${++repeaterIdCounter}_${Date.now()}`;
-    
-    try {
-      // Store all desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
-      // These will be applied in onBeforeSendHeaders where we can set any header
-      pendingRepeaterRequests.set(repeaterId, {
-        headers: modifiedRequest.headers,
-        url: modifiedRequest.url,
-        method: modifiedRequest.method,
-        body: modifiedRequest.body
-      });
-      
-      // Only use marker header for fetch - all other headers will be set in onBeforeSendHeaders
-      const fetchOptions = {
-        method: modifiedRequest.method,
-        headers: {
-          'X-Repeater-ID': repeaterId
-        }
-      };
-      
-      if (['POST', 'PUT', 'PATCH'].includes(modifiedRequest.method) && modifiedRequest.body) {
-        fetchOptions.body = modifiedRequest.body;
-      }
-      
-      const startTime = Date.now();
-      const response = await fetch(modifiedRequest.url, fetchOptions);
-      const duration = Date.now() - startTime;
-      
-      // Cleanup after successful request
-      pendingRepeaterRequests.delete(repeaterId);
-      
-      const responseHeaders = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-      
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      let responseBody = '';
-      
-      // Determine status line - use HTTP/1.1 as fallback if protocol not available
-      // fetch response doesn't typically expose protocol version
-      const statusText = response.statusText || 'OK';
-      const statusLine = `HTTP/1.1 ${response.status} ${statusText}`;
-      
-      if (contentType.includes('image/')) {
-        const blob = await response.blob();
-        const arrayBuffer = await blob.arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
-        responseBody = safeUint8ArrayToBase64(uint8Array);
-        request.isBase64 = true;
-      } else {
-        responseBody = await response.text();
-        if (responseBody.length > 2000000) {
-          responseBody = responseBody.substring(0, 2000000) + '\n... [Truncated at 2MB]';
-        }
-        request.isBase64 = false;
-      }
-      
-      request.statusCode = response.status;
-      request.statusLine = statusLine;
-      request.responseHeaders = responseHeaders;
-      request.responseBody = responseBody;
-      request.completed = true;
-      request.autoModified = true; // Ensure it's marked
-      request.wasModified = true;
-      
-      notifyDevTools({
-        type: 'updateRequest',
-        request: request
-      });
-      
-    } catch (error) {
-      // Cleanup on error as well
-      pendingRepeaterRequests.delete(repeaterId);
-      
-      request.statusCode = 0;
-      request.statusLine = `Modification Failed: ${error.message}`;
-      request.completed = true;
-      
-      notifyDevTools({
-        type: 'updateRequest',
-        request: request
-      });
-    }
+function moveRequestEditsToRepeater(request, modifiedRequest, port) {
+  let draftHeaders = HttpModel.normalizeHeaders(modifiedRequest.headers);
+  if (modifiedRequest.body !== request.requestBody) {
+    draftHeaders = HttpModel.removeHeader(draftHeaders, "content-length");
+  }
+
+  request.intercepted = false;
+  request.interceptionHandled = true;
+  request.repeaterDraftCreated = true;
+  request.statusLine = "Original Forwarded; Edits Moved to Repeater";
+  request.modifiedUrl = modifiedRequest.url;
+  request.modifiedMethod = modifiedRequest.method;
+  request.modifiedHeaders = HttpModel.cloneHeaders(draftHeaders);
+  request.modifiedBody = modifiedRequest.body;
+  request.modifiedBodyEncoding = modifiedRequest.bodyEncoding || "text";
+
+  notifyDevTools({ type: "updateRequest", request });
+  safePortMessage(port, {
+    type: "repeaterDraft",
+    requestData: {
+      ...modifiedRequest,
+      headers: draftHeaders,
+    },
+  });
 }
 
-async function handleForwardRequest(requestId, modifiedRequest) {
+function recordModifiedRequest(request, pending, modifiedRequest) {
+  request.originalUrl = pending.url;
+  request.originalMethod = pending.method;
+  request.originalHeaders = HttpModel.cloneHeaders(pending.requestHeaders);
+  request.originalBody = pending.requestBody;
+  request.originalBodyEncoding = HttpModel.bodyEditorEncoding(
+    request.requestBodyModel,
+  );
+  request.modifiedUrl = modifiedRequest.url;
+  request.modifiedMethod = modifiedRequest.method;
+  request.modifiedHeaders = HttpModel.normalizeHeaders(modifiedRequest.headers);
+  request.modifiedBody = modifiedRequest.body;
+  request.modifiedBodyEncoding = modifiedRequest.bodyEncoding || "text";
+  request.wasModified = true;
+}
+
+function getModifiedRequestData(request) {
+  return {
+    method: request.modifiedMethod || request.method,
+    url: request.modifiedUrl || request.url,
+    headers: HttpModel.cloneHeaders(
+      request.modifiedHeaders || request.requestHeaders,
+    ),
+    body:
+      request.modifiedBody !== undefined
+        ? request.modifiedBody
+        : request.requestBody,
+    bodyEncoding:
+      request.modifiedBodyEncoding ||
+      HttpModel.bodyEditorEncoding(request.requestBodyModel),
+    bodyEditable: true,
+    bodyReplayable: true,
+  };
+}
+
+async function performReplacementRequest(job, trigger) {
+  if (job.fallbackTimer) {
+    clearTimeout(job.fallbackTimer);
+    job.fallbackTimer = null;
+  }
+
+  const request = requests.get(job.requestId);
+  if (request) {
+    request.replacementState = "sending";
+    request.replacementTrigger = trigger;
+    request.statusLine = "Original Cancelled; Sending Edited Request";
+    notifyDevTools({ type: "updateRequest", request });
+  }
+  safePortMessage(job.port, {
+    type: "replacementStarted",
+    requestId: job.requestId,
+    requestData: job.requestData,
+  });
+
+  try {
+    const response = await sendExtensionRequest(
+      job.requestData,
+      "intercept-replacement",
+    );
+    if (request) {
+      request.replacementState = "succeeded";
+      request.replacementStatusCode = response.status;
+      request.replacementDuration = response.duration;
+      request.replacementFinalUrl = response.finalUrl;
+      request.statusLine = `Edited Request Sent (${response.status})`;
+      request.completed = true;
+      notifyDevTools({ type: "updateRequest", request });
+    }
+    replacementResults.set(job.requestId, {
+      state: "succeeded",
+      response,
+      storedAt: Date.now(),
+    });
+    safePortMessage(job.port, {
+      type: "replacementResponse",
+      requestId: job.requestId,
+      response,
+    });
+  } catch (error) {
+    const errorMessage = extensionRequestErrorMessage(error, "Edited");
+    const timedOut = error?.name === "AbortError";
+    if (request) {
+      request.replacementState = timedOut ? "timeout" : "failed";
+      request.replacementError = errorMessage;
+      request.statusLine = timedOut
+        ? "Edited Request Timed Out"
+        : "Edited Request Failed";
+      request.completed = true;
+      notifyDevTools({ type: "updateRequest", request });
+    }
+    replacementResults.set(job.requestId, {
+      state: timedOut ? "timeout" : "failed",
+      error: errorMessage,
+      storedAt: Date.now(),
+    });
+    safePortMessage(job.port, {
+      type: "replacementError",
+      requestId: job.requestId,
+      error: errorMessage,
+    });
+  } finally {
+    pendingReplacementJobs.delete(job.originalRequestId);
+  }
+}
+
+function failReplacementBeforeSend(job, reason) {
+  if (job.fallbackTimer) {
+    clearTimeout(job.fallbackTimer);
+    job.fallbackTimer = null;
+  }
+  pendingReplacementJobs.delete(job.originalRequestId);
+  const request = requests.get(job.requestId);
+  const originalCompleted = reason === "original-completed";
+  const error = originalCompleted
+    ? "The original request completed before Firefox confirmed cancellation. The edited request was not sent to avoid a duplicate."
+    : "Firefox did not confirm cancellation in time; the edited request was not sent to avoid a duplicate.";
+  if (request) {
+    request.originalOutcome = originalCompleted
+      ? "completed-unexpectedly"
+      : "cancellation-unconfirmed";
+    request.replacementState = "failed";
+    request.replacementError = error;
+    request.statusLine = originalCompleted
+      ? "Original Was Not Cancelled; Edited Request Not Sent"
+      : "Cancellation Unconfirmed; Edited Request Not Sent";
+    request.completed = true;
+    notifyDevTools({ type: "updateRequest", request });
+  }
+  replacementResults.set(job.requestId, {
+    state: "failed",
+    error,
+    storedAt: Date.now(),
+  });
+  safePortMessage(job.port, {
+    type: "replacementError",
+    requestId: job.requestId,
+    error,
+  });
+}
+
+function queueReplacementRequest(
+  originalRequestId,
+  pending,
+  request,
+  modifiedRequest,
+  port,
+) {
+  const job = {
+    originalRequestId,
+    requestId: request.id,
+    requestData: modifiedRequest,
+    port,
+    fallbackTimer: null,
+    started: false,
+    startOnce: null,
+    failOnce: null,
+  };
+  const startController = RequestInterception.createReplacementStartController(
+    (trigger) => {
+      job.started = true;
+      void performReplacementRequest(job, trigger);
+    },
+    (reason) => failReplacementBeforeSend(job, reason),
+  );
+  job.startOnce = (reason) => startController.confirm(reason);
+  job.failOnce = (reason) => startController.fail(reason);
+  pendingReplacementJobs.set(originalRequestId, job);
+
+  request.originalOutcome = "cancelled";
+  request.replacementState = "queued";
+  request.extensionOrigin = true;
+  request.statusCode = 0;
+  request.statusLine = "Cancelling Original; Edited Request Queued";
+  recordModifiedRequest(request, pending, modifiedRequest);
+  notifyDevTools({ type: "updateRequest", request });
+  safePortMessage(port, {
+    type: "replacementQueued",
+    requestId: request.id,
+    requestData: modifiedRequest,
+  });
+
+  interceptedRequestIds.delete(originalRequestId);
+  interceptedResponseTabIds.delete(originalRequestId);
+  responseInterceptionControls.delete(originalRequestId);
+  resolvePendingRequest(
+    originalRequestId,
+    pending,
+    { cancel: true },
+    "cancelled-for-replacement",
+  );
+
+  job.fallbackTimer = setTimeout(() => {
+    if (pendingReplacementJobs.get(originalRequestId) !== job) return;
+    job.failOnce("confirmation-timeout");
+  }, REPLACEMENT_CANCEL_CONFIRM_TIMEOUT_MS);
+}
+
+async function handleForwardRequest(requestId, modifiedRequest, port) {
   let originalRequestId = null;
   let pending = null;
-  
+
   for (const [key, value] of pendingRequests.entries()) {
     if (value.id === requestId) {
       originalRequestId = key;
@@ -1854,126 +2521,101 @@ async function handleForwardRequest(requestId, modifiedRequest) {
       break;
     }
   }
-  
-  if (pending && pending.resolve) {
-    const request = requests.get(requestId);
-    
-    const urlChanged = modifiedRequest && modifiedRequest.url !== pending.url;
-    const methodChanged = modifiedRequest && modifiedRequest.method !== pending.method;
-    const headersChanged = modifiedRequest && JSON.stringify(modifiedRequest.headers) !== JSON.stringify(pending.requestHeaders);
-    const bodyChanged = modifiedRequest && modifiedRequest.body !== pending.requestBody;
-    
-    const wasModified = urlChanged || methodChanged || headersChanged || bodyChanged;
-    
-    if (pending.stage === 'onBeforeRequest') {
-        if (methodChanged || bodyChanged) {
-             // Method/body changes require cancel + resend (onBeforeRequest API only supports redirectUrl)
-             request.originalUrl = pending.url;
-             request.originalMethod = pending.method;
-             request.originalBody = pending.requestBody;
-             request.modifiedUrl = modifiedRequest.url;
-             request.modifiedMethod = modifiedRequest.method;
-             request.modifiedBody = modifiedRequest.body;
-             request.wasModified = true;
-             request.intercepted = false;
-             
-             pending.resolve({ cancel: true });
-             pendingRequests.delete(originalRequestId);
-             
-             resendModifiedRequest(request, modifiedRequest);
-             return;
-        } else if (urlChanged) {
-             request.originalUrl = pending.url;
-             request.modifiedUrl = modifiedRequest.url;
-             request.wasModified = true;
-             request.statusLine = 'Redirecting (Early Intercept)';
-             request.intercepted = false;
-             
-             notifyDevTools({ type: 'updateRequest', request: request });
-             
-             pending.resolve({ redirectUrl: modifiedRequest.url });
-        } else {
-             request.intercepted = false;
-             request.statusLine = 'Forwarded (Early Intercept)';
-             notifyDevTools({ type: 'updateRequest', request: request });
-             pending.resolve({});
-        }
-        pendingRequests.delete(originalRequestId);
-        return;
-    }
 
-    if (wasModified && request) {
-      request.originalUrl = pending.url;
-      request.originalMethod = pending.method;
-      request.originalHeaders = { ...pending.requestHeaders };
-      request.originalBody = pending.requestBody;
-      
-      request.modifiedUrl = modifiedRequest.url;
-      request.modifiedMethod = modifiedRequest.method;
-      request.modifiedHeaders = { ...modifiedRequest.headers };
-      request.modifiedBody = modifiedRequest.body;
-      request.wasModified = true;
-      
-      if (urlChanged || bodyChanged || methodChanged) {
-        if (request.type === 'main_frame' && modifiedRequest.method === 'GET' && modifiedRequest.url !== pending.url) {
-          pending.resolve({ cancel: true });
-          pendingRequests.delete(originalRequestId);
-          
-          request.intercepted = false;
-          request.statusLine = 'Redirecting (Navigation)';
-          request.statusCode = 307;
-          request.completed = true;
-          
-          notifyDevTools({
-            type: 'updateRequest',
-            request: request
-          });
-          
-          browser.tabs.update(request.tabId, { url: modifiedRequest.url });
-          return;
-        }
+  if (!pending?.resolve) return;
 
-        pending.resolve({ cancel: true });
-        pendingRequests.delete(originalRequestId);
-        
-        resendModifiedRequest(request, modifiedRequest);
-        return;
-      }
-      
-      if (headersChanged) {
-         const modifiedHeadersArray = Object.entries(modifiedRequest.headers).map(([name, value]) => ({
-            name,
-            value
-         }));
-         
-         pending.resolve({ requestHeaders: modifiedHeadersArray });
-         pendingRequests.delete(originalRequestId);
-         
-         request.statusLine = 'Forwarded (Headers Modified)';
-         request.intercepted = false;
-         notifyDevTools({ type: 'updateRequest', request: request });
-         return;
-      }
-    } else {
-      pending.resolve({});
-      pendingRequests.delete(originalRequestId);
-      
-      if (request) {
-        request.intercepted = false;
-        request.statusLine = 'Forwarded (Unmodified)';
-        notifyDevTools({
-          type: 'updateRequest',
-          request: request
-        });
-      }
-    }
+  const request = requests.get(requestId);
+  if (!request || !modifiedRequest) return;
+
+  const replayCandidate = {
+    ...modifiedRequest,
+    bodyReplayable: request.requestBodyModel?.replayable !== false,
+    bodyUnavailableReason: request.requestBodyModel?.reason,
+  };
+  const decision = RequestInterception.decideInterceptAction(
+    pending,
+    replayCandidate,
+    {
+      modifiedRequestAction: interceptSettings.modifiedRequestAction,
+      maxBodyBytes: EDITABLE_RESPONSE_LIMIT,
+    },
+  );
+
+  if (decision.action === "reject-edit") {
+    safePortMessage(port, {
+      type: "interceptValidationError",
+      requestId,
+      errors: decision.validation.errors,
+    });
+    return;
+  }
+
+  if (decision.edits.anyChanged) {
+    recordModifiedRequest(request, pending, replayCandidate);
+  }
+
+  switch (decision.action) {
+    case "create-repeater-draft":
+      resolvePendingRequest(
+        originalRequestId,
+        pending,
+        pending.fallbackResponse || {},
+        "repeater-draft",
+      );
+      moveRequestEditsToRepeater(request, replayCandidate, port);
+      return;
+
+    case "redirect":
+      request.statusLine = "Redirecting (Early Intercept)";
+      notifyDevTools({ type: "updateRequest", request });
+      resolvePendingRequest(
+        originalRequestId,
+        pending,
+        { redirectUrl: replayCandidate.url },
+        "redirected",
+      );
+      return;
+
+    case "apply-headers":
+      resolvePendingRequest(
+        originalRequestId,
+        pending,
+        { requestHeaders: HttpModel.normalizeHeaders(replayCandidate.headers) },
+        "headers-modified",
+      );
+      request.statusLine = "Forwarded (Headers Modified)";
+      notifyDevTools({ type: "updateRequest", request });
+      return;
+
+    case "cancel-and-send":
+      queueReplacementRequest(
+        originalRequestId,
+        pending,
+        request,
+        replayCandidate,
+        port,
+      );
+      return;
+
+    default:
+      resolvePendingRequest(
+        originalRequestId,
+        pending,
+        pending.fallbackResponse || {},
+        "forwarded",
+      );
+      request.statusLine =
+        pending.stage === "onBeforeRequest"
+          ? "Forwarded (Early Intercept)"
+          : "Forwarded (Unmodified)";
+      notifyDevTools({ type: "updateRequest", request });
   }
 }
 
 function handleDropRequest(requestId) {
   let originalRequestId = null;
   let pending = null;
-  
+
   for (const [key, value] of pendingRequests.entries()) {
     if (value.id === requestId) {
       originalRequestId = key;
@@ -1981,74 +2623,110 @@ function handleDropRequest(requestId) {
       break;
     }
   }
-  
+
   if (pending && pending.resolve) {
     const request = requests.get(requestId);
     if (request) {
       request.intercepted = false;
-      request.statusLine = 'Dropped';
+      request.statusLine = "Dropped";
       request.statusCode = 0;
       request.completed = true;
       notifyDevTools({
-        type: 'updateRequest',
-        request: request
+        type: "updateRequest",
+        request: request,
       });
     }
-    
-    pending.resolve({ cancel: true });
-    pendingRequests.delete(originalRequestId);
+
+    resolvePendingRequest(
+      originalRequestId,
+      pending,
+      { cancel: true },
+      "dropped",
+    );
   }
 }
 
-async function fetchResponseBody(request) {
+function sendResponseValidationError(port, requestId, errors) {
+  safePortMessage(port, {
+    type: "responseInterceptValidationError",
+    requestId,
+    errors,
+  });
+}
+
+function prepareModifiedResponseData(pending, modifiedResponse) {
+  if (!modifiedResponse.bodyEdited) {
+    return getOriginalResponseData(pending);
+  }
+
+  return pending.isBase64
+    ? HttpModel.base64ToBytes(modifiedResponse.body)
+    : new TextEncoder().encode(String(modifiedResponse.body ?? ""));
+}
+
+function writeOriginalResponseFailSafe(pending, context) {
   try {
-    const response = await fetch(request.url, {
-      method: 'GET',
-      credentials: 'omit'
-    });
-    const text = await response.text();
-    request.responseBody = text.substring(0, 50000);
-    notifyDevTools({
-      type: 'updateRequest',
-      request: request
-    });
+    pending.filter.write(getOriginalResponseData(pending));
   } catch (error) {
-    console.error('Failed to fetch response body:', error);
+    console.error(
+      `Failed to restore original response after ${context}:`,
+      error,
+    );
   }
+
+  try {
+    pending.filter.close();
+  } catch {}
 }
 
-function handleForwardResponse(requestId, modifiedResponse) {
+function handleForwardResponse(requestId, modifiedResponse, port) {
+  modifiedResponse =
+    modifiedResponse && typeof modifiedResponse === "object"
+      ? modifiedResponse
+      : {};
   const headerIntercept = pendingResponseHeaderIntercepts.get(requestId);
   if (headerIntercept) {
-    const { resolve, originalRequestId, request } = headerIntercept;
-    
-    if (modifiedResponse && modifiedResponse.headers) {
-      const modifiedHeadersArray = Object.entries(modifiedResponse.headers).map(([name, value]) => ({
-        name,
-        value
-      }));
-      
-      if (request) {
-        request.responseHeaders = modifiedResponse.headers;
-        request.statusLine = 'Headers Modified';
-        notifyDevTools({
-          type: 'updateRequest',
-          request: request
-        });
-      }
-      
-      resolve({ responseHeaders: modifiedHeadersArray });
-    } else {
-      resolve({});
+    const { request } = headerIntercept;
+    const validation = RequestInterception.validateEditedResponse(
+      modifiedResponse,
+      { maxBodyBytes: EDITABLE_RESPONSE_LIMIT },
+    );
+    if (!validation.valid) {
+      sendResponseValidationError(port, requestId, validation.errors);
+      return;
     }
-    
-    pendingResponseHeaderIntercepts.delete(requestId);
+
+    const sourceHeaders = modifiedResponse?.headersEdited
+      ? modifiedResponse.headers
+      : headerIntercept.responseHeaders;
+    // Response body editing happens after headers are released. Content-Length
+    // must therefore be removed up front so a later body edit cannot leave a
+    // stale byte count on the wire.
+    const forwardedHeaders = HttpModel.removeHeader(
+      sourceHeaders,
+      "content-length",
+    );
+
+    if (request) {
+      request.responseHeaders = HttpModel.cloneHeaders(forwardedHeaders);
+      if (modifiedResponse?.headersEdited) {
+        request.statusLine = "Response Headers Modified";
+      }
+      notifyDevTools({ type: "updateRequest", request });
+    }
+
+    resolvePendingResponseHeaders(
+      requestId,
+      headerIntercept,
+      { responseHeaders: forwardedHeaders },
+      "headers-forwarded",
+    );
     return;
   }
 
   let originalRequestId = null;
   let pending = null;
-  
+
   for (const [key, value] of pendingResponses.entries()) {
     if (value.requestId === requestId) {
       originalRequestId = key;
@@ -2056,47 +2734,94 @@ function handleForwardResponse(requestId, modifiedResponse) {
       break;
     }
   }
-  
+
   if (pending && pending.filter) {
-    try {
-      const request = requests.get(requestId);
-      if (request) {
-        request.responseIntercepted = false;
-        request.statusLine = 'Response Modified';
-        notifyDevTools({
-          type: 'updateRequest',
-          request: request
-        });
-      }
-      
-      const bodyToForward = modifiedResponse.body || pending.responseBody;
-      let modifiedData;
-      if (pending.isBase64) {
-        // Decode base64 back to binary for image/binary responses
-        const binaryString = atob(bodyToForward);
-        modifiedData = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          modifiedData[i] = binaryString.charCodeAt(i);
-        }
-      } else {
-        modifiedData = new TextEncoder().encode(bodyToForward);
-      }
-      pending.filter.write(modifiedData);
-      pending.filter.close();
-      
-      pendingResponses.delete(originalRequestId);
-    } catch (e) {
-      console.error('Failed to forward modified response:', e);
-      pending.filter.close();
-      pendingResponses.delete(originalRequestId);
+    const validation = RequestInterception.validateEditedResponse(
+      modifiedResponse,
+      { maxBodyBytes: EDITABLE_RESPONSE_LIMIT },
+    );
+    if (!validation.valid) {
+      sendResponseValidationError(port, requestId, validation.errors);
+      return;
     }
+
+    let modifiedData;
+    try {
+      // Decode and size-check before settling the pending response. A bad edit
+      // must leave the interception open so the user can correct it.
+      modifiedData = prepareModifiedResponseData(pending, modifiedResponse);
+    } catch (error) {
+      sendResponseValidationError(port, requestId, [
+        {
+          field: "body",
+          code: "invalid-body-encoding",
+          message: `The edited response body could not be decoded: ${error.message}`,
+        },
+      ]);
+      return;
+    }
+
+    settlePendingData(pending, () => {
+      pendingResponses.delete(originalRequestId);
+
+      try {
+        const request = requests.get(requestId);
+        if (request) {
+          request.responseIntercepted = false;
+          request.statusLine = modifiedResponse.bodyEdited
+            ? "Response Body Modified"
+            : "Response Forwarded";
+          notifyDevTools({
+            type: "updateRequest",
+            request: request,
+          });
+        }
+
+        pending.filter.write(modifiedData);
+        pending.filter.close();
+        notifyInterceptionReleased(pending, "response", "body-forwarded");
+      } catch (e) {
+        console.error("Failed to forward modified response:", e);
+        writeOriginalResponseFailSafe(
+          pending,
+          "modified response write failure",
+        );
+        notifyInterceptionReleased(pending, "response", "body-forward-failed");
+      }
+    });
   }
 }
 
 function handleDropResponse(requestId) {
+  const headerIntercept = pendingResponseHeaderIntercepts.get(requestId);
+  if (headerIntercept) {
+    const request = requests.get(requestId);
+    if (request) {
+      request.responseIntercepted = false;
+      request.statusLine = "Response Dropped";
+      request.statusCode = 0;
+      request.completed = true;
+      notifyDevTools({ type: "updateRequest", request });
+    }
+
+    resolvePendingResponseHeaders(
+      requestId,
+      headerIntercept,
+      { cancel: true },
+      "dropped",
+    );
+    interceptedRequestIds.delete(headerIntercept.originalRequestId);
+    interceptedResponseTabIds.delete(headerIntercept.originalRequestId);
+    responseInterceptionControls.delete(headerIntercept.originalRequestId);
+    try {
+      headerIntercept.filter?.close();
+    } catch {}
+    return;
+  }
+
   let originalRequestId = null;
   let pending = null;
-  
+
   for (const [key, value] of pendingResponses.entries()) {
     if (value.requestId === requestId) {
       originalRequestId = key;
@@ -2104,202 +2829,323 @@ function handleDropResponse(requestId) {
       break;
     }
   }
-  
+
   if (pending && pending.filter) {
-    const request = requests.get(requestId);
-    if (request) {
-      request.responseIntercepted = false;
-      request.statusLine = 'Response Dropped';
-      request.statusCode = 0;
-      notifyDevTools({
-        type: 'updateRequest',
-        request: request
-      });
-    }
-    
-    pending.filter.close();
-    pendingResponses.delete(originalRequestId);
+    settlePendingData(pending, () => {
+      pendingResponses.delete(originalRequestId);
+      const request = requests.get(requestId);
+      if (request) {
+        request.responseIntercepted = false;
+        request.statusLine = "Response Dropped";
+        request.statusCode = 0;
+        request.completed = true;
+        notifyDevTools({
+          type: "updateRequest",
+          request: request,
+        });
+      }
+
+      pending.filter.close();
+      notifyInterceptionReleased(pending, "response", "dropped");
+    });
   }
 }
 
 function getOriginalResponseData(responseData) {
+  if (responseData.originalBytes) {
+    return responseData.originalBytes;
+  }
+
   if (!responseData.isBase64) {
     return new TextEncoder().encode(responseData.responseBody);
   }
 
-  const binaryString = atob(responseData.responseBody);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let index = 0; index < binaryString.length; index++) {
-    bytes[index] = binaryString.charCodeAt(index);
-  }
-  return bytes;
+  return HttpModel.base64ToBytes(responseData.responseBody);
 }
 
 function releasePendingInterceptions(tabId = null) {
-  const belongsToTab = pendingData => tabId === null ||
-    pendingData?.tabId === tabId || pendingData?.request?.tabId === tabId;
+  const belongsToTab = (pendingData) =>
+    tabId === null ||
+    pendingData?.tabId === tabId ||
+    pendingData?.request?.tabId === tabId;
 
   for (const [originalRequestId, pendingData] of pendingRequests.entries()) {
     if (belongsToTab(pendingData)) {
-      pendingData.resolve?.({});
-      pendingRequests.delete(originalRequestId);
+      resolvePendingRequest(
+        originalRequestId,
+        pendingData,
+        pendingData.fallbackResponse || {},
+        "disabled",
+      );
     }
   }
 
   // Response interception starts by pausing at onHeadersReceived. These
   // Promises must be resolved separately; they are not stored in
   // pendingResponses until after the body arrives.
-  for (const [requestId, pendingData] of pendingResponseHeaderIntercepts.entries()) {
+  for (const [
+    requestId,
+    pendingData,
+  ] of pendingResponseHeaderIntercepts.entries()) {
     if (belongsToTab(pendingData)) {
-      pendingData.resolve?.({});
-      pendingResponseHeaderIntercepts.delete(requestId);
+      resolvePendingResponseHeaders(requestId, pendingData, {}, "disabled");
     }
   }
 
   for (const [originalRequestId, responseData] of pendingResponses.entries()) {
     if (!belongsToTab(responseData)) continue;
 
-    try {
-      responseData.filter.write(getOriginalResponseData(responseData));
-      responseData.filter.close();
-    } catch (error) {
-      console.error('Failed to release intercepted response:', error);
-      try { responseData.filter.close(); } catch (_) {}
-    }
-    pendingResponses.delete(originalRequestId);
+    settlePendingData(responseData, () => {
+      pendingResponses.delete(originalRequestId);
+      try {
+        responseData.filter.write(getOriginalResponseData(responseData));
+        responseData.filter.close();
+      } catch (error) {
+        console.error("Failed to release intercepted response:", error);
+        try {
+          responseData.filter.close();
+        } catch {}
+      }
+      notifyInterceptionReleased(responseData, "response", "disabled");
+    });
   }
 
   for (const originalRequestId of interceptedRequestIds) {
     const interceptedTabId = interceptedResponseTabIds.get(originalRequestId);
     if (tabId === null || interceptedTabId === tabId) {
+      const responseControl =
+        responseInterceptionControls.get(originalRequestId);
+      if (responseControl) responseControl.bypassBody = true;
       interceptedRequestIds.delete(originalRequestId);
       interceptedResponseTabIds.delete(originalRequestId);
     }
   }
 }
 
-function handleDisableIntercept() {
-  interceptEnabled = false;
-  releasePendingInterceptions();
-  
-  updateIcon();
-  notifyDevTools({ 
-    type: 'interceptStateChanged', 
-    enabled: false 
-  });
+function handleDisableIntercept(tabId) {
+  setTabInterceptEnabled(tabId, false);
 }
 
-function notifyDevTools(message) {
-  devtoolsPorts.forEach(port => {
-    try {
-      port.postMessage(message);
-    } catch (e) {
-      console.error('Failed to send message to devtools:', e);
-    }
-  });
+function inferMessageTabId(message) {
+  if (message.request?.tabId !== undefined) return message.request.tabId;
+  if (message.finding?.tabId !== undefined) return message.finding.tabId;
+
+  const responseRequestId = message.response?.requestId;
+  if (responseRequestId && requests.has(responseRequestId)) {
+    return requests.get(responseRequestId).tabId;
+  }
+
+  return null;
+}
+
+function notifyDevTools(message, explicitTabId) {
+  const tabId =
+    arguments.length > 1 ? explicitTabId : inferMessageTabId(message);
+  const failures = devtoolsPorts.postMessage(message, tabId);
+
+  for (const { error } of failures) {
+    console.error("Failed to send message to devtools:", error);
+  }
 }
 
 function applyRuleReplacement(source, rule) {
-    try {
-        const type = rule.matchType || 'regex'; // Default to regex for backward compatibility
-        const pattern = rule.matchPattern;
-        const replacement = rule.replaceValue;
-        
-        if (!pattern) return source;
-
-        switch (type) {
-            case 'regex':
-                const regex = new RegExp(pattern, 'g');
-                return source.replace(regex, replacement);
-                
-            case 'contains':
-                // Global string replacement
-                return source.split(pattern).join(replacement);
-                
-            case 'starts_with':
-                if (source.startsWith(pattern)) {
-                    return replacement + source.substring(pattern.length);
-                }
-                return source;
-            
-            case 'ends_with':
-                if (source.endsWith(pattern)) {
-                    return source.substring(0, source.length - pattern.length) + replacement;
-                }
-                return source;
-                
-            case 'exact':
-                if (source === pattern) {
-                    return replacement;
-                }
-                return source;
-                
-            default:
-                return source;
-        }
-    } catch (e) {
-        console.error('Error applying rule replacement:', e);
-        return source;
-    }
+  return MatchReplace.applyRuleReplacement(source, rule);
 }
 
-async function handleRepeaterRequest(requestData, port) {
-  // Generate unique repeater ID for tracking this request (outside try block for cleanup access)
-  const repeaterId = `repeater_${++repeaterIdCounter}_${Date.now()}`;
-  
+async function readFetchResponsePrefix(response, limit) {
+  const collector = ByteBufferCore.createBoundedCollector(limit);
+  const reader = response.body?.getReader();
+  const declaredLength = parseInt(response.headers.get("content-length"), 10);
+
+  if (!reader) {
+    if (Number.isFinite(declaredLength) && declaredLength > limit) {
+      return {
+        bytes: new Uint8Array(0),
+        capturedBytes: 0,
+        totalBytes: declaredLength,
+        truncated: true,
+      };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    collector.add(bytes);
+  } else {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      collector.add(value);
+      if (collector.truncated) {
+        await reader.cancel("display limit reached");
+        break;
+      }
+    }
+  }
+
+  return {
+    bytes: collector.toUint8Array(),
+    capturedBytes: collector.capturedBytes,
+    totalBytes:
+      Number.isFinite(declaredLength) && declaredLength >= 0
+        ? declaredLength
+        : collector.totalBytes,
+    truncated:
+      collector.truncated ||
+      (Number.isFinite(declaredLength) &&
+        declaredLength > collector.capturedBytes),
+  };
+}
+
+function createExtensionRequestId(source) {
+  const randomValues = new Uint32Array(4);
+  crypto.getRandomValues(randomValues);
+  const randomPart = Array.from(randomValues, (value) =>
+    value.toString(16).padStart(8, "0"),
+  ).join("");
+  return `${source}_${++extensionRequestCounter}_${Date.now()}_${randomPart}`;
+}
+
+function safePortMessage(port, message) {
   try {
-    // Store all user's desired headers (including forbidden ones like Cookie, Host, Origin, etc.)
-    // These will be applied in onBeforeSendHeaders where we can set any header
-    pendingRepeaterRequests.set(repeaterId, {
-      headers: requestData.headers,
+    port?.postMessage(message);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extensionRequestErrorMessage(error, sourceLabel) {
+  return error?.name === "AbortError"
+    ? `${sourceLabel} request timed out after 30 seconds.`
+    : error?.message || `${sourceLabel} request failed.`;
+}
+
+async function sendExtensionRequest(requestData, source) {
+  const extensionRequestId = createExtensionRequestId(source);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    EXTENSION_REQUEST_TIMEOUT_MS,
+  );
+
+  try {
+    let extensionHeaders = HttpModel.removeHeader(
+      requestData.headers,
+      EXTENSION_REQUEST_MARKER_HEADER,
+    );
+    if (requestData.body !== undefined) {
+      extensionHeaders = HttpModel.removeHeader(
+        extensionHeaders,
+        "content-length",
+      );
+    }
+
+    pendingExtensionRequests.set(extensionRequestId, {
+      source,
+      headers: extensionHeaders,
       url: requestData.url,
       method: requestData.method,
-      body: requestData.body
+      body: requestData.body,
+      createdAt: Date.now(),
     });
-    
-    // Only use marker header for fetch - all other headers will be set in onBeforeSendHeaders
+
     const options = {
       method: requestData.method,
       headers: {
-        'X-Repeater-ID': repeaterId
-      }
+        [EXTENSION_REQUEST_MARKER_HEADER]: extensionRequestId,
+      },
+      redirect: "follow",
+      signal: controller.signal,
     };
-    
-    if (['POST', 'PUT', 'PATCH'].includes(requestData.method) && requestData.body) {
-      options.body = requestData.body;
+
+    if (
+      HttpModel.requestMethodAllowsBody(requestData.method) &&
+      requestData.body !== undefined
+    ) {
+      options.body =
+        requestData.bodyEncoding === "base64"
+          ? HttpModel.base64ToBytes(requestData.body)
+          : requestData.body;
     }
-    
+
     const startTime = Date.now();
     const response = await fetch(requestData.url, options);
     const duration = Date.now() - startTime;
-    
-    // Cleanup after successful request
-    pendingRepeaterRequests.delete(repeaterId);
-    
-    const responseHeaders = {};
+
+    let responseHeaders = [];
     response.headers.forEach((value, key) => {
-      responseHeaders[key] = value;
+      responseHeaders.push({ name: key, value });
     });
-    
-    const responseBody = await response.text();
-    
-    port.postMessage({
-      type: 'repeaterResponse',
-      response: {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-        body: responseBody,
-        duration: duration
+    if (typeof response.headers.getSetCookie === "function") {
+      const cookies = response.headers.getSetCookie();
+      if (cookies.length > 0) {
+        responseHeaders = HttpModel.removeHeader(responseHeaders, "set-cookie");
+        responseHeaders.push(
+          ...cookies.map((value) => ({ name: "set-cookie", value })),
+        );
       }
+    }
+
+    const contentType = (
+      HttpModel.getHeaderValue(responseHeaders, "content-type") || ""
+    ).toLowerCase();
+    const isTextResponse =
+      contentType.startsWith("text/") ||
+      contentType.includes("json") ||
+      contentType.includes("xml") ||
+      contentType.includes("javascript") ||
+      contentType.includes("x-www-form-urlencoded");
+    const responseCapture = await readFetchResponsePrefix(
+      response,
+      DISPLAY_CAPTURE_LIMIT,
+    );
+    const responseBytes = responseCapture.bytes;
+    const responseBody = isTextResponse
+      ? new TextDecoder("utf-8").decode(responseBytes)
+      : HttpModel.bytesToBase64(responseBytes);
+
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+      body: responseBody,
+      isBase64: !isTextResponse,
+      capturedBytes: responseCapture.capturedBytes,
+      totalBytes: responseCapture.totalBytes,
+      truncated: responseCapture.truncated,
+      duration,
+      finalUrl: response.url,
+      redirected: response.redirected,
+      extensionOrigin: true,
+      source,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+    extensionRequestChains.clearExtension(extensionRequestId);
+    pendingExtensionRequests.delete(extensionRequestId);
+  }
+}
+
+async function handleRepeaterRequest(requestData, port, requestId) {
+  try {
+    const validation = RequestInterception.validateEditedRequest(requestData, {
+      maxBodyBytes: EDITABLE_RESPONSE_LIMIT,
     });
+    if (!validation.valid) {
+      safePortMessage(port, {
+        type: "repeaterError",
+        requestId,
+        error: validation.errors.map((item) => item.message).join(" "),
+        validationErrors: validation.errors,
+      });
+      return;
+    }
+
+    const response = await sendExtensionRequest(requestData, "repeater");
+    safePortMessage(port, { type: "repeaterResponse", requestId, response });
   } catch (error) {
-    // Cleanup on error as well
-    pendingRepeaterRequests.delete(repeaterId);
-    
-    port.postMessage({
-      type: 'repeaterError',
-      error: error.message
+    safePortMessage(port, {
+      type: "repeaterError",
+      requestId,
+      error: extensionRequestErrorMessage(error, "Repeater"),
     });
   }
 }

@@ -1,6 +1,6 @@
 
 
-const SecurityScanner = {
+const SharedSecurityScanner = {
     // API Key patterns - comprehensive patterns based on official documentation
     // All patterns support both JSON ("key": "value") and config (key = "value") formats where applicable
     apiKeyPatterns: [
@@ -29,7 +29,10 @@ const SecurityScanner = {
         { pattern: /github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/g, type: 'GitHub Personal Access Token (Fine-Grained)', severity: 'critical', strict: true },
         { pattern: /gho_[a-zA-Z0-9]{36}/g, type: 'GitHub OAuth 2.0 Access Token', severity: 'critical', strict: true },
         { pattern: /ghu_[a-zA-Z0-9]{36}/g, type: 'GitHub User-to-Server Access Token', severity: 'critical', strict: true },
-        { pattern: /ghs_[a-zA-Z0-9]{36}/g, type: 'GitHub Server-to-Server Access Token', severity: 'critical', strict: true },
+        // Stateful (classic opaque) installation token. The boundary prevents a partial match inside the new format.
+        { pattern: /ghs_[a-zA-Z0-9]{36}(?![a-zA-Z0-9.\-_])/g, type: 'GitHub Server-to-Server Access Token', severity: 'critical', strict: true },
+        // GitHub's recommended expression supports both classic and stateless JWT installation tokens.
+        { pattern: /ghs_[A-Za-z0-9.\-_]{36,}/g, type: 'GitHub Server-to-Server Access Token', severity: 'critical', strict: true },
         { pattern: /ghr_[a-zA-Z0-9]{36}/g, type: 'GitHub Refresh Token', severity: 'critical', strict: true },
         
         // ==========================================
@@ -485,7 +488,8 @@ const SecurityScanner = {
             apiEndpoints: [],
             parameters: [],
             paths: [],
-            totalFindings: 0
+            totalFindings: 0,
+            significantFindings: 0
         };
 
         // Scan for each category
@@ -513,19 +517,19 @@ const SecurityScanner = {
             this.scanWithPatterns(content, this.pathPatterns, 'Paths')
         );
 
-        // Calculate total (excluding low-severity items for the count)
-        results.totalFindings = 
-            results.apiKeys.length +
-            results.credentials.length;
+        results.categories = {
+            apiKeys: results.apiKeys,
+            credentials: results.credentials,
+            emails: results.emails,
+            apiEndpoints: results.apiEndpoints,
+            parameters: results.parameters,
+            paths: results.paths
+        };
+        results.totalFindings = Object.values(results.categories)
+            .reduce((total, findings) => total + findings.length, 0);
+        results.significantFindings = results.apiKeys.length + results.credentials.length;
 
-        // Return null if no significant findings
-        const hasSignificantFindings = 
-            results.apiKeys.length > 0 ||
-            results.credentials.length > 0;
-
-        if (!hasSignificantFindings && 
-            results.emails.length === 0 && 
-            results.apiEndpoints.length === 0) {
+        if (results.totalFindings === 0) {
             return null;
         }
 
@@ -583,8 +587,9 @@ const SecurityScanner = {
     }
 };
 
-// Export for use in panel.js
-if (typeof window !== 'undefined') {
-    window.SecurityScanner = SecurityScanner;
-}
+globalThis.EnhancedNetworkTab = globalThis.EnhancedNetworkTab || {};
+globalThis.EnhancedNetworkTab.SecurityScannerCore = SharedSecurityScanner;
 
+if (typeof module === 'object' && module.exports) {
+    module.exports = SharedSecurityScanner;
+}
